@@ -1,0 +1,223 @@
+# The catalog's pages: a category or the search (the same page, with filters, facets, order and
+# pages) and a product.
+import ui "../caju-ui/ui"
+import style "../caju-style/style"
+import "./model"
+import "./kit"
+
+let SHEET = style.sheet("catalog")
+
+let layout = style.def("catalog-layout", "mt-6 grid gap-8 lg:grid-cols-[240px_minmax(0,1fr)]")
+let side = style.def("catalog-side", "flex flex-col gap-6")
+let side_title = style.def("catalog-side-title", "mb-2 text-xs font-semibold tracking-[0.12em] text-muted-foreground uppercase")
+let facet_list = style.def("catalog-facets", "flex flex-col")
+let facet = style.def("catalog-facet", "flex items-center justify-between rounded-lg px-2.5 py-1.5 text-sm hover:bg-muted")
+let facet_on = style.def("catalog-facet-on", "@catalog-facet bg-accent-soft font-semibold text-accent hover:bg-accent-soft")
+let price_row = style.def("catalog-price-row", "flex items-center gap-2 [&_input]:h-9 [&_input]:w-full [&_input]:min-w-0 [&_input]:rounded-lg [&_input]:border [&_input]:border-input [&_input]:bg-card [&_input]:px-2.5 [&_input]:text-sm")
+let head = style.def("catalog-head", "flex flex-col gap-2")
+let toolbar = style.def("catalog-toolbar", "mb-5 flex flex-wrap items-center justify-between gap-3 border-b pb-4")
+let sort_select = style.def("catalog-sort", "h-9 rounded-lg border border-input bg-card px-2.5 text-sm")
+let chips = style.def("catalog-chips", "flex flex-wrap gap-2")
+let chip = style.def("catalog-chip", "inline-flex h-8 items-center rounded-full border bg-card px-3 text-[13px] font-medium hover:border-primary/40")
+let chip_on = style.def("catalog-chip-on", "@catalog-chip border-primary bg-primary text-primary-foreground hover:border-primary")
+let filter_form = style.def("catalog-filter-form", "flex flex-col gap-3")
+
+const SORTS = "relevance:Mais relevantes;price-asc:Menor preço;price-desc:Maior preço;newest:Novidades;name:Nome (A–Z)"
+
+export struct SearchPageProps {
+  search: model.Search
+}
+
+# the filters change the page's address; with the program they apply as soon as they change
+export fn SearchPage(p: SearchPageProps) -> *ui.Node {
+  s := p.search
+  sp := &s
+  facets := []*ui.Node{}
+  all_cls := facet
+  if s.category == "" { all_cls = facet_on }
+  facets = append(facets, <a class={all_cls} href={model.search_url(sp, "categoria", "")}><span>Todas</span></a>)
+  for _, f := range s.facets {
+    cls := facet
+    if f.slug == s.category { cls = facet_on }
+    for _, sub := range s.subcategories {
+      if sub.slug == s.category && sub.parent_id == f.id { cls = facet_on }
+    }
+    facets = append(facets, <a key={f.id} class={cls} href={model.search_url(sp, "categoria", f.slug)}><span>{f.name}</span><span class={kit.muted_text}>{f.count}</span></a>)
+  }
+  subs := ui.empty()
+  if len(s.subcategories) > 0 {
+    items := []*ui.Node{}
+    for _, c := range s.subcategories {
+      cls := chip
+      if c.slug == s.category { cls = chip_on }
+      items = append(items, <a key={c.id} class={cls} href={model.search_url(sp, "categoria", c.slug)}>{c.name}</a>)
+    }
+    subs = <nav class={chips} aria-label="Subcategorias">{items}</nav>
+  }
+  sorts := []*ui.Node{}
+  for _, pair := range split2(SORTS) {
+    sorts = append(sorts, <option value={pair[0]} selected={pair[0] == s.sort}>{pair[1]}</option>)
+  }
+  cards := []*ui.Node{}
+  for _, pr := range s.products { cards = append(cards, ui.keyed(pr.id, <kit.ProductCard product={pr} />)) }
+  results := ui.empty()
+  if len(cards) == 0 {
+    results = kit.empty_state("Nenhum produto encontrado", "Tente outras palavras ou tire alguns filtros.", <a class={kit.button_ghost} href={s.base}>Limpar filtros</a>)
+  } else {
+    results = <div class={kit.product_grid}>{cards}</div>
+  }
+  cat_field := ui.empty()
+  if s.base == "/busca" && s.category != "" { cat_field = <input type="hidden" name="categoria" value={s.category} /> }
+  return (
+    <div class={kit.container}>
+      <div class={head}>
+        {kit.crumbs(s.crumbs)}
+        <h1 class={kit.page_title}>{s.heading}</h1>
+        {ui.when(s.intro != "", <p class={kit.muted_text}>{s.intro}</p>)}
+        {subs}
+      </div>
+      <div class={layout}>
+        <aside class={side} aria-label="Filtros">
+          <div>
+            <div class={side_title}>Departamentos</div>
+            <div class={facet_list}>{facets}</div>
+          </div>
+          <form class={filter_form} method="get" action={s.base}>
+            {ui.when(s.q != "", <input type="hidden" name="q" value={s.q} />)}
+            {cat_field}
+            {ui.when(s.sort != "relevance", <input type="hidden" name="sort" value={s.sort} />)}
+            <div>
+              <div class={side_title}>Preço (R$)</div>
+              <div class={price_row}>
+                <input type="text" inputmode="decimal" name="min" value={s.min} placeholder="mín." aria-label="Preço mínimo" />
+                <span>–</span>
+                <input type="text" inputmode="decimal" name="max" value={s.max} placeholder="máx." aria-label="Preço máximo" />
+              </div>
+            </div>
+            <Toggle label="Só promoções" name="promo" on={s.sale} url={model.search_url(sp, "promo", flip(s.sale))} />
+            <Toggle label="Só com estoque" name="estoque" on={s.stock} url={model.search_url(sp, "estoque", flip(s.stock))} />
+            <button class={kit.button_ghost} type="submit">Aplicar filtros</button>
+          </form>
+        </aside>
+        <section aria-label="Produtos">
+          <div class={toolbar}>
+            <span class={kit.muted_text} data-total={s.total}>{model.plural(s.total, "produto", "produtos")}</span>
+            <SortSelect search={s} options={sorts} />
+          </div>
+          {results}
+          {kit.pagination(s.page, s.pages, fn(n: int) -> str { return model.search_url(sp, "page", str(n)) })}
+        </section>
+      </div>
+    </div>
+  )
+}
+
+fn flip(on: bool) -> str {
+  if on { return "" }
+  return "1"
+}
+
+fn split2(s: str) -> [][]str {
+  out := [][]str{}
+  start := 0
+  for i := 0; i <= len(s); i++ {
+    if i == len(s) || s[i:i + 1] == ";" {
+      part := s[start:i]
+      for k := 0; k < len(part); k++ {
+        if part[k:k + 1] == ":" {
+          out = append(out, []str{part[0:k], part[k + 1:]})
+          break
+        }
+      }
+      start = i + 1
+    }
+  }
+  return out
+}
+
+struct ToggleProps {
+  label: str
+  name: str
+  on: bool
+  url: str
+}
+
+# a filter's checkbox: in the form it goes with "Aplicar"; with the program, it applies at once
+fn Toggle(p: ToggleProps) -> *ui.Node {
+  return (
+    <label class={kit.check_box}>
+      <input type="checkbox" name={p.name} value="1" checked={p.on} onChange={fn() { kit.visit(p.url) }} />
+      {p.label}
+    </label>
+  )
+}
+
+struct SortSelectProps {
+  search: model.Search
+  options: []*ui.Node
+}
+
+fn SortSelect(p: SortSelectProps) -> *ui.Node {
+  s := p.search
+  return (
+    <label class={kit.row}>
+      <span class={kit.muted_text}>Ordenar por</span>
+      <select class={sort_select} name="sort" aria-label="Ordenar" onChange={fn(e: *ui.Event) { kit.visit(model.search_url(&s, "sort", e.value)) }}>{p.options}</select>
+    </label>
+  )
+}
+
+# ---------------------------------------------------------------- a product
+
+let product_layout = style.def("product-layout", "mt-6 grid gap-8 md:grid-cols-2 lg:gap-12")
+let product_picture = style.def("product-picture", "aspect-square w-full rounded-2xl border bg-muted")
+let product_info = style.def("product-info", "flex flex-col gap-5")
+let product_title = style.def("product-title", "text-3xl leading-tight font-bold sm:text-4xl")
+let product_price = style.def("product-price", "flex flex-col gap-1 [&_.price-now]:text-3xl [&_.price-now-sale]:text-3xl")
+let product_text = style.def("product-text", "text-base leading-relaxed text-foreground/85")
+let product_facts = style.def("product-facts", "grid grid-cols-2 gap-3 rounded-xl border bg-card p-4 text-sm [&_dt]:text-muted-foreground [&_dd]:font-semibold")
+let related_box = style.def("product-related", "mt-14")
+
+export struct ProductPageProps {
+  data: model.ProductData
+}
+
+export fn ProductPage(p: ProductPageProps) -> *ui.Node {
+  pr := p.data.product
+  stock := <dd>{model.plural(pr.stock, "unidade", "unidades")}</dd>
+  if pr.stock == 0 { stock = <dd>Esgotado</dd> }
+  related := []*ui.Node{}
+  for _, r := range p.data.related { related = append(related, ui.keyed(r.id, <kit.ProductCard product={r} />)) }
+  sale := ui.empty()
+  if model.on_sale(pr) { sale = <span class={kit.badge_sale}>{model.off(pr)}% de desconto</span> }
+  return (
+    <div class={kit.container}>
+      {kit.crumbs(p.data.crumbs)}
+      <div class={product_layout}>
+        <img class={product_picture} src={kit.image_url(pr.id, pr.hue)} alt={pr.name} width="600" height="600" />
+        <div class={product_info}>
+          <h1 class={product_title}>{pr.name}</h1>
+          <div class={product_price}>
+            {sale}
+            {kit.price(pr)}
+            <span class={kit.muted_text}>em até 3x sem juros no cartão (demonstração)</span>
+          </div>
+          <kit.AddToCart product={pr} big={true} />
+          <p class={product_text}>{pr.description}</p>
+          <dl class={product_facts}>
+            <div><dt>Categoria</dt><dd><a class={kit.link} href={"/categoria/" + pr.category_slug}>{pr.category}</a></dd></div>
+            <div><dt>Estoque</dt>{stock}</div>
+            <div><dt>Código</dt><dd>#{pr.id}</dd></div>
+            <div><dt>Entrega</dt><dd>calculada no carrinho</dd></div>
+          </dl>
+        </div>
+      </div>
+      {ui.when(len(related) > 0, (
+        <section class={related_box}>
+          <h2 class={kit.section_title}>Da mesma categoria</h2>
+          <div class={kit.product_grid} style="margin-top:1.25rem">{related}</div>
+        </section>
+      ))}
+    </div>
+  )
+}

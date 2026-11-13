@@ -1,0 +1,367 @@
+# The cart, the checkout and an order's page.
+import ui "../caju-ui/ui"
+import style "../caju-style/style"
+import "std/json"
+import "./model"
+import "./kit"
+
+let SHEET = style.sheet("cart")
+
+let cart_layout = style.def("cart-layout", "mt-6 grid gap-8 lg:grid-cols-[minmax(0,1fr)_360px] lg:items-start")
+let line_list = style.def("cart-lines", "flex flex-col rounded-xl [&>*:not(:last-child)]:border-b border bg-card")
+let line_row = style.def("cart-line", "grid grid-cols-[72px_minmax(0,1fr)] gap-4 p-4 sm:grid-cols-[88px_minmax(0,1fr)_auto] sm:items-center")
+let line_img = style.def("cart-line-img", "size-[72px] rounded-lg border bg-muted sm:size-[88px]")
+let line_name = style.def("cart-line-name", "font-semibold hover:text-primary")
+let line_side = style.def("cart-line-side", "col-span-2 flex items-center justify-between gap-4 sm:col-span-1 sm:flex-col sm:items-end")
+let stepper = style.def("cart-stepper", "inline-flex h-9 items-center rounded-lg border bg-card [&_button]:inline-flex [&_button]:size-9 [&_button]:cursor-pointer [&_button]:items-center [&_button]:justify-center [&_button:hover]:bg-muted [&_button:disabled]:opacity-40")
+let stepper_n = style.def("cart-stepper-n", "w-9 text-center text-sm font-semibold tabular-nums")
+let summary = style.def("cart-summary", "@card flex flex-col gap-3 lg:sticky lg:top-36")
+let sum_row = style.def("cart-sum-row", "flex items-center justify-between text-sm [&_span:last-child]:tabular-nums")
+let sum_total = style.def("cart-sum-total", "flex items-center justify-between border-t pt-3 text-lg font-bold [&_span:last-child]:tabular-nums")
+let remove_btn = style.def("cart-remove", "inline-flex cursor-pointer items-center gap-1 text-[13px] text-muted-foreground hover:text-danger")
+
+# ---------------------------------------------------------------- the cart
+
+export struct CartPageProps {
+  cart: model.Cart
+  free_from: int
+}
+
+struct CartReply {
+  cart: model.Cart
+  count: int
+  message: str
+}
+
+export fn CartPage(p: CartPageProps) -> *ui.Node {
+  sh := kit.shell()
+  cart := ui.use_state(p.cart)
+  busy := ui.use_bool(false)
+  c := cart.v.(model.Cart)
+  # with the program, a change goes through the API and the page updates in place
+  change := fn(id: int, qty: int) {
+    if busy.v { return }
+    busy.set(true)
+    kit.api("POST", "/api/carrinho/" + str(id), kit.form([]str{"qty", str(qty)}), fn(code: int, body: str) {
+      busy.set(false)
+      if code != 200 {
+        kit.notify(sh, kit.error_of(body), "error")
+        return
+      }
+      r := CartReply{}
+      json.unmarshal(body, &r)
+      cart.set(r.cart)
+      sh.count.set(r.count)
+      if r.message != "" { kit.notify(sh, r.message, "error") }
+    })
+  }
+  if len(c.lines) == 0 {
+    return (
+      <div class={kit.container}>
+        <h1 class={kit.page_title}>Carrinho</h1>
+        <div style="margin-top:1.5rem">{kit.empty_state("Seu carrinho está vazio", "Que tal começar pelas cocadas?", <a class={kit.button_primary} href="/">Ir às compras</a>)}</div>
+      </div>
+    )
+  }
+  rows := []*ui.Node{}
+  for _, l := range c.lines {
+    id := l.product.id
+    q := l.qty
+    rows = append(rows, (
+      <div key={id} class={line_row} data-line={l.product.slug}>
+        <img class={line_img} src={kit.image_url(id, l.product.hue)} alt="" />
+        <div>
+          <a class={line_name} href={"/produto/" + l.product.slug}>{l.product.name}</a>
+          <div class={kit.muted_text}>{model.money(model.current(l.product))} cada</div>
+        </div>
+        <div class={line_side}>
+          <form class={stepper} method="post" action={"/carrinho/" + str(id)}>
+            <button type="submit" name="qty" value={str(q - 1)} aria-label="Menos um" disabled={busy.v} onClick:prevent={fn() { change(id, q - 1) }}>{kit.icon_minus(16)}</button>
+            <span class={stepper_n} data-qty={q}>{q}</span>
+            <button type="submit" name="qty" value={str(q + 1)} aria-label="Mais um" disabled={busy.v || q >= l.product.stock} onClick:prevent={fn() { change(id, q + 1) }}>{kit.icon_plus(16)}</button>
+          </form>
+          <strong class={kit.num_cell}>{model.money(l.total)}</strong>
+          <form method="post" action={"/carrinho/" + str(id)}>
+            <button class={remove_btn} type="submit" name="qty" value="0" onClick:prevent={fn() { change(id, 0) }}>{kit.icon_trash(14)}Remover</button>
+          </form>
+        </div>
+      </div>
+    ))
+  }
+  problems := []*ui.Node{}
+  for _, pr := range c.problems { problems = append(problems, <div class={kit.alert_warn}>{pr}</div>) }
+  missing := p.free_from - c.subtotal
+  free_note := ui.empty()
+  if p.free_from > 0 && missing > 0 { free_note = <p class={kit.muted_text}>Faltam {model.money(missing)} para o frete grátis.</p> }
+  if p.free_from > 0 && missing <= 0 { free_note = <p class={kit.muted_text}>Você ganhou frete grátis.</p> }
+  return (
+    <div class={kit.container}>
+      <h1 class={kit.page_title}>Carrinho</h1>
+      <div class={cart_layout}>
+        <div class={kit.stack}>
+          {problems}
+          <div class={line_list}>{rows}</div>
+          <a class={kit.link} href="/">← Continuar comprando</a>
+        </div>
+        <aside class={summary} aria-label="Resumo">
+          <div class={sum_row}><span>{model.plural(c.count, "item", "itens")}</span><span>{model.money(c.subtotal)}</span></div>
+          <div class={sum_row}><span>Frete</span><span>calculado a seguir</span></div>
+          <div class={sum_total}><span>Subtotal</span><span data-subtotal={c.subtotal}>{model.money(c.subtotal)}</span></div>
+          {free_note}
+          <a class={kit.button_large} href="/finalizar" aria-disabled={str(len(c.problems) > 0)}>Finalizar compra</a>
+        </aside>
+      </div>
+    </div>
+  )
+}
+
+# ---------------------------------------------------------------- the checkout
+
+let addr_list = style.def("checkout-addresses", "flex flex-col gap-2")
+let addr_option = style.def("checkout-address", "flex cursor-pointer items-start gap-3 rounded-xl border bg-card p-4 text-sm has-checked:border-primary has-checked:bg-accent-soft/40 [&_input]:mt-1 [&_input]:accent-primary")
+let step_title = style.def("checkout-step", "mb-3 text-xl font-bold")
+let coupon_row = style.def("checkout-coupon", "flex gap-2 [&_input]:h-10 [&_input]:min-w-0 [&_input]:flex-1 [&_input]:rounded-lg [&_input]:border [&_input]:border-input [&_input]:bg-card [&_input]:px-3 [&_input]:uppercase")
+let mini_line = style.def("checkout-mini-line", "flex justify-between gap-3 text-sm [&_span:last-child]:tabular-nums [&_span:last-child]:whitespace-nowrap")
+let details = style.def("checkout-new-address", "rounded-xl border bg-card p-4 [&_summary]:cursor-pointer [&_summary]:font-semibold")
+
+export struct CheckoutPageProps {
+  data: model.Checkout
+  page: model.Page
+}
+
+fn address_text(a: model.Address) -> str {
+  t := a.street + ", " + a.number
+  if a.complement != "" { t = t + " (" + a.complement + ")" }
+  return t + " · " + a.district + " · " + a.city + "/" + a.state + " · CEP " + a.cep
+}
+
+export fn CheckoutPage(p: CheckoutPageProps) -> *ui.Node {
+  sh := kit.shell()
+  d := p.data
+  quote := ui.use_state(d.quote)
+  addr := ui.use_int(d.address_id)
+  coupon := ui.use_str(d.quote.coupon)
+  q := quote.v.(model.Quote)
+  # with the program, the shipping and the coupon are quoted without reloading
+  requote := fn(address_id: int, code: str) {
+    kit.api("GET", "/api/cotacao?endereco=" + str(address_id) + "&cupom=" + model.esc(code), "", fn(status: int, body: str) {
+      if status != 200 {
+        kit.notify(sh, kit.error_of(body), "error")
+        return
+      }
+      nq := model.Quote{}
+      json.unmarshal(body, &nq)
+      quote.set(nq)
+    })
+  }
+  opts := []*ui.Node{}
+  for _, a := range d.addresses {
+    id := a.id
+    label := a.label
+    if label == "" { label = "Endereço" }
+    opts = append(opts, (
+      <label key={id} class={addr_option}>
+        <input type="radio" name="address_id" value={str(id)} checked={id == addr.v} onChange={fn() {
+          addr.set(id)
+          requote(id, coupon.v)
+        }} />
+        <span><strong>{label}</strong><br />{address_text(a)}</span>
+      </label>
+    ))
+  }
+  lines := []*ui.Node{}
+  for _, l := range d.cart.lines { lines = append(lines, <div key={l.product.id} class={mini_line}><span>{l.qty} × {l.product.name}</span><span>{model.money(l.total)}</span></div>) }
+  shipping := "escolha o endereço"
+  if q.method != "" {
+    shipping = model.money(q.shipping)
+    if q.shipping == 0 { shipping = "grátis" }
+  }
+  applied := q.coupon
+  if q.coupon_error != "" { applied = "" }
+  f := kit.form_of(p.page)
+  e := kit.errors_of(p.page)
+  new_addr := (
+    <details class={details} open={len(d.addresses) == 0 || len(e) > 0}>
+      <summary>Cadastrar um endereço</summary>
+      <form method="post" action="/conta/enderecos" style="margin-top:1rem">
+        <input type="hidden" name="next" value="/finalizar" />
+        <AddressFields form={f} errors={e} />
+        <button class={kit.button_accent} type="submit" style="margin-top:1rem">Salvar endereço</button>
+      </form>
+    </details>
+  )
+  return (
+    <div class={kit.container}>
+      <h1 class={kit.page_title}>Finalizar compra</h1>
+      <div class={cart_layout}>
+        <div class={kit.stack}>
+          <section>
+            <h2 class={step_title}>1. Entrega</h2>
+            <form id="checkout" method="post" action="/finalizar">
+              <div class={addr_list}>{opts}</div>
+              <input type="hidden" name="coupon" value={applied} />
+            </form>
+          </section>
+          {new_addr}
+          <section>
+            <h2 class={step_title}>2. Pagamento</h2>
+            <div class={kit.card}>
+              <strong>Pix</strong>
+              <p class={kit.muted_text}>Depois de confirmar, mostramos um código Pix de demonstração: nada é cobrado, e o pagamento é simulado com um botão.</p>
+            </div>
+          </section>
+        </div>
+        <aside class={summary} aria-label="Resumo do pedido">
+          <h2 class={step_title}>Resumo</h2>
+          {lines}
+          <div class={sum_row} style="border-top:1px solid var(--border);padding-top:.75rem"><span>Subtotal</span><span>{model.money(d.cart.subtotal)}</span></div>
+          <div class={sum_row}><span>Frete {q.method}</span><span data-shipping={q.shipping}>{shipping}</span></div>
+          {ui.when(q.method != "", <div class={sum_row}><span>Prazo</span><span>{q.days} dias úteis</span></div>)}
+          {ui.when(q.discount > 0, <div class={sum_row}><span>Cupom {q.coupon}</span><span data-discount={q.discount}>-{model.money(q.discount)}</span></div>)}
+          <form class={coupon_row} method="get" action="/finalizar">
+            <input type="hidden" name="endereco" value={str(addr.v)} />
+            <input type="text" name="cupom" value={coupon.v} placeholder="Cupom" aria-label="Cupom de desconto" onInput={fn(ev: *ui.Event) { coupon.set(ev.value) }} />
+            <button class={kit.button_ghost} type="submit" onClick:prevent={fn() { requote(addr.v, coupon.v) }}>Aplicar</button>
+          </form>
+          {ui.when(q.coupon_error != "", <span class={kit.alert_error} data-coupon-error="">{q.coupon_error}</span>)}
+          <div class={sum_total}><span>Total</span><span data-total={q.total}>{model.money(q.total)}</span></div>
+          <button class={kit.button_large} type="submit" form="checkout" disabled={len(d.addresses) == 0 || len(d.cart.problems) > 0}>Fazer pedido</button>
+          {ui.when(len(d.cart.problems) > 0, <a class={kit.link} href="/carrinho">Revise o carrinho: há itens sem estoque.</a>)}
+        </aside>
+      </div>
+    </div>
+  )
+}
+
+export struct AddressFieldsProps {
+  form: map[str]str
+  errors: map[str]str
+}
+
+export fn AddressFields(p: AddressFieldsProps) -> *ui.Node {
+  f := p.form
+  e := p.errors
+  return (
+    <div class={kit.form_grid}>
+      <kit.Field label="CEP" name="cep" value={f["cep"]} error={e["cep"]} placeholder="00000-000" autocomplete="postal-code" required={true} />
+      <kit.Field label="Nome do endereço" name="label" value={f["label"]} error={e["label"]} placeholder="Casa, trabalho…" />
+      <div class={kit.span_2}><kit.Field label="Rua" name="street" value={f["street"]} error={e["street"]} autocomplete="address-line1" required={true} /></div>
+      <kit.Field label="Número" name="number" value={f["number"]} error={e["number"]} required={true} />
+      <kit.Field label="Complemento" name="complement" value={f["complement"]} error={e["complement"]} />
+      <kit.Field label="Bairro" name="district" value={f["district"]} error={e["district"]} required={true} />
+      <kit.Field label="Cidade" name="city" value={f["city"]} error={e["city"]} autocomplete="address-level2" required={true} />
+      <kit.Field label="Estado (UF)" name="state" value={f["state"]} error={e["state"]} placeholder="PE" autocomplete="address-level1" required={true} />
+    </div>
+  )
+}
+
+# ---------------------------------------------------------------- an order
+
+let order_head = style.def("order-head", "flex flex-wrap items-center gap-3")
+let timeline = style.def("order-timeline", "flex flex-col gap-3 border-l-2 border-border pl-5 [&_li]:relative [&_li]:text-sm [&_li]:before:absolute [&_li]:before:top-1.5 [&_li]:before:-left-[27px] [&_li]:before:size-3 [&_li]:before:rounded-full [&_li]:before:bg-primary [&_li]:before:content-['']")
+let pix_box = style.def("order-pix", "@card flex flex-col gap-3 border-primary/30 bg-accent-soft/30")
+let pix_code = style.def("order-pix-code", "rounded-lg border bg-card p-3 font-mono text-xs break-all")
+
+export struct OrderViewProps {
+  order: model.Order
+  admin: bool
+}
+
+export fn OrderView(p: OrderViewProps) -> *ui.Node {
+  sh := kit.shell()
+  o := p.order
+  lines := []*ui.Node{}
+  for _, l := range o.lines {
+    lines = append(lines, (
+      <tr key={l.product_id}>
+        <td><a class={kit.link} href={"/produto/" + l.slug}>{l.name}</a></td>
+        <td class={kit.num_cell}>{l.qty}</td>
+        <td class={kit.num_cell}>{model.money(l.unit)}</td>
+        <td class={kit.num_cell}>{model.money(l.total)}</td>
+      </tr>
+    ))
+  }
+  events := []*ui.Node{}
+  for i, ev := range o.events {
+    who := ""
+    if ev.actor != "" { who = " · " + ev.actor }
+    note := ""
+    if ev.note != "" { note = " — " + ev.note }
+    events = append(events, <li key={i}><strong>{model.status_label(ev.status)}</strong>{note}<div class={kit.muted_text}>{ev.at}{who}</div></li>)
+  }
+  pay := ui.empty()
+  if o.status == "pending" && !p.admin {
+    pay = (
+      <section class={pix_box}>
+        <h2 class={kit.section_title}>Pague com Pix</h2>
+        <p class={kit.muted_text}>Código de demonstração (não pague nada): copie, ou simule o pagamento.</p>
+        <div class={pix_code} data-pix="">{o.pix}</div>
+        <div class={kit.row}>
+          <button class={kit.button_ghost} type="button" onClick={fn() {
+            ui.copy(o.pix)
+            kit.notify(sh, "Código copiado.", "ok")
+          }}>Copiar código</button>
+          <form method="post" action={"/pedidos/" + str(o.id) + "/pagar"}><button class={kit.button_primary} type="submit">Simular pagamento</button></form>
+          <form method="post" action={"/pedidos/" + str(o.id) + "/cancelar"}><button class={kit.button_danger} type="submit">Cancelar pedido</button></form>
+        </div>
+      </section>
+    )
+  }
+  tracking := ui.empty()
+  if o.tracking != "" { tracking = <p>Rastreio: <strong data-tracking="">{o.tracking}</strong></p> }
+  a := o.address
+  return (
+    <div class={kit.stack}>
+      <div class={order_head}>
+        {kit.status_badge(o.status)}
+        <span class={kit.muted_text}>feito em {o.created}</span>
+      </div>
+      {pay}
+      <div class={cart_layout}>
+        <div class={kit.stack}>
+          <div class={kit.table_wrap}>
+            <table class={kit.table}>
+              <thead><tr><th>Produto</th><th class={kit.num_cell}>Qtd.</th><th class={kit.num_cell}>Preço</th><th class={kit.num_cell}>Total</th></tr></thead>
+              <tbody>{lines}</tbody>
+            </table>
+          </div>
+          <section class={kit.card}>
+            <h2 class={step_title}>Histórico</h2>
+            <ol class={timeline}>{events}</ol>
+          </section>
+        </div>
+        <aside class={kit.stack}>
+          <div class={summary}>
+            <div class={sum_row}><span>Subtotal</span><span>{model.money(o.subtotal)}</span></div>
+            <div class={sum_row}><span>Frete ({o.method})</span><span>{model.money(o.shipping)}</span></div>
+            {ui.when(o.discount > 0, <div class={sum_row}><span>Cupom {o.coupon}</span><span>-{model.money(o.discount)}</span></div>)}
+            <div class={sum_total}><span>Total</span><span>{model.money(o.total)}</span></div>
+          </div>
+          <div class={kit.card}>
+            <h2 class={step_title}>Entrega</h2>
+            <p><strong>{o.ship_name}</strong></p>
+            <p class={kit.muted_text}>{address_text(a)}</p>
+            <p class={kit.muted_text}>Prazo: {o.days} dias úteis depois do pagamento</p>
+            {tracking}
+          </div>
+        </aside>
+      </div>
+    </div>
+  )
+}
+
+export struct OrderPageProps {
+  order: model.Order
+}
+
+export fn OrderPage(p: OrderPageProps) -> *ui.Node {
+  return (
+    <div class={kit.container}>
+      <div class={kit.stack}>
+        <a class={kit.link} href="/conta/pedidos">← Meus pedidos</a>
+        <h1 class={kit.page_title}>Pedido #{p.order.id}</h1>
+        <OrderView order={p.order} admin={false} />
+      </div>
+    </div>
+  )
+}

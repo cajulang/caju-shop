@@ -1,0 +1,49 @@
+# PostgreSQL 17 for development, in the local k3s: data in a volume, the port on the host
+# (ServiceLB): postgres://shop:shop-dev@127.0.0.1:55440/shop
+#   kubectl apply -f deploy/postgres.yaml
+apiVersion: v1
+kind: Namespace
+metadata: { name: caju-shop }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: pg-data, namespace: caju-shop }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 2Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: pg, namespace: caju-shop }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: pg } }
+  template:
+    metadata: { labels: { app: pg } }
+    spec:
+      containers:
+        - name: pg
+          image: postgres:17-alpine
+          ports: [{ containerPort: 5432 }]
+          env:
+            - { name: POSTGRES_USER, value: shop }
+            - { name: POSTGRES_PASSWORD, value: shop-dev }
+            - { name: POSTGRES_DB, value: shop }
+            - { name: POSTGRES_INITDB_ARGS, value: --auth=scram-sha-256 }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          readinessProbe:
+            exec: { command: [pg_isready, -U, shop, -d, shop] }
+            periodSeconds: 2
+          volumeMounts: [{ name: data, mountPath: /var/lib/postgresql/data }]
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: pg-data }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: pg, namespace: caju-shop }
+spec:
+  type: LoadBalancer
+  selector: { app: pg }
+  ports: [{ port: 55440, targetPort: 5432 }]

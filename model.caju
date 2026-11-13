@@ -1,0 +1,507 @@
+# The data the pages show, shared by the server (which fills it from the database) and the browser
+# (which gets it as JSON in the page and hydrates the same components). Money is in cents.
+import "std/strings"
+
+export struct User {
+  id: int
+  name: str
+  email: str
+  role: str               # customer, operator, admin
+}
+
+export struct Category {
+  id: int
+  parent_id: int          # 0: a top category
+  name: str
+  slug: str
+  description: str
+  position: int
+  products: int           # how many active products (with the subcategories', for a top one)
+  depth: int              # 0 top, 1 child (the panel's flat list)
+  children: []Category
+}
+
+export struct Product {
+  id: int
+  category_id: int
+  category: str
+  category_slug: str
+  name: str
+  slug: str
+  description: str
+  price: int
+  sale: int               # 0: not on sale
+  stock: int
+  active: bool
+  hue: int
+  created: str
+}
+
+export struct Section {
+  id: int
+  title: str
+  subtitle: str
+  position: int
+  active: bool
+  count: int
+  products: []Product
+}
+
+export struct Facet {
+  id: int
+  name: str
+  slug: str
+  count: int
+}
+
+export struct Crumb {
+  name: str
+  href: str
+}
+
+# the store's search: the filters as they are in the URL, the results and the facets
+export struct Search {
+  q: str
+  category: str           # a category's slug ("" all)
+  min: str                # in reais, as typed
+  max: str
+  sale: bool
+  stock: bool
+  sort: str               # relevance, price-asc, price-desc, newest, name
+  page: int
+  pages: int
+  total: int
+  products: []Product
+  facets: []Facet
+  heading: str
+  intro: str
+  crumbs: []Crumb
+  subcategories: []Category
+  base: str               # the path the filters apply to (/busca or /categoria/x)
+}
+
+export struct HomeData {
+  sections: []Section
+  categories: []Category
+}
+
+export struct ProductData {
+  product: Product
+  crumbs: []Crumb
+  related: []Product
+}
+
+export struct CartLine {
+  product: Product
+  qty: int
+  total: int
+}
+
+export struct Cart {
+  lines: []CartLine
+  count: int
+  subtotal: int
+  problems: []str         # items without enough stock
+}
+
+export struct Address {
+  id: int
+  label: str
+  cep: str
+  street: str
+  number: str
+  complement: str
+  district: str
+  city: str
+  state: str
+}
+
+export struct Quote {
+  method: str
+  days: int
+  shipping: int
+  discount: int
+  coupon: str
+  coupon_error: str
+  free_from: int
+  total: int
+}
+
+export struct Checkout {
+  cart: Cart
+  addresses: []Address
+  address_id: int
+  quote: Quote
+}
+
+export struct OrderLine {
+  product_id: int
+  slug: str
+  name: str
+  unit: int
+  qty: int
+  total: int
+  hue: int
+}
+
+export struct OrderEvent {
+  status: str
+  note: str
+  actor: str
+  at: str
+}
+
+export struct Order {
+  id: int
+  status: str
+  customer_id: int
+  customer: str
+  email: str
+  subtotal: int
+  shipping: int
+  discount: int
+  total: int
+  coupon: str
+  items: int
+  lines: []OrderLine
+  events: []OrderEvent
+  address: Address
+  ship_name: str
+  method: str
+  days: int
+  tracking: str
+  created: str
+  pix: str
+}
+
+export struct Account {
+  name: str
+  email: str
+  phone: str
+  addresses: []Address
+  orders: []Order
+}
+
+# ---------------------------------------------------------------- the admin panel
+
+export struct Stat {
+  label: str
+  value: str
+  note: str
+  href: str
+}
+
+export struct DayTotal {
+  day: str                # "13/11"
+  total: int
+  orders: int
+}
+
+export struct TopProduct {
+  id: int
+  name: str
+  qty: int
+  total: int
+}
+
+export struct Dashboard {
+  stats: []Stat
+  days: []DayTotal
+  top: []TopProduct
+  by_status: []Facet
+  low_stock: []Product
+  recent: []Order
+}
+
+export struct StockMove {
+  delta: int
+  reason: str
+  actor: str
+  order_id: int
+  at: str
+}
+
+export struct CustomerRow {
+  id: int
+  name: str
+  email: str
+  phone: str
+  role: str
+  blocked: bool
+  orders: int
+  spent: int
+  created: str
+}
+
+export struct Coupon {
+  code: str
+  kind: str
+  value: int
+  min: int
+  max_uses: int           # 0: no limit
+  used: int
+  expires: str            # yyyy-mm-dd, "" never
+  active: bool
+}
+
+export struct Rate {
+  id: int
+  name: str
+  cep_from: str
+  cep_to: str
+  price: int
+  days: int
+}
+
+export struct AuditEntry {
+  actor: str
+  action: str
+  entity: str
+  entity_id: str
+  detail: str
+  at: str
+}
+
+# a list of the panel: the filters as they are in the URL and the page
+export struct Listing {
+  q: str
+  filter: str
+  filter2: str
+  sort: str
+  page: int
+  pages: int
+  total: int
+}
+
+export struct Admin {
+  dashboard: *Dashboard
+  listing: Listing
+  products: []Product
+  product: *Product
+  moves: []StockMove
+  sections_of: []int      # the sections a product is in
+  categories: []Category  # flat, in tree order (children after their parent)
+  sections: []Section
+  section: *Section
+  orders: []Order
+  order: *Order
+  customers: []CustomerRow
+  customer: *CustomerRow
+  addresses: []Address
+  coupons: []Coupon
+  rates: []Rate
+  settings: map[str]str
+  staff: []CustomerRow
+  audit: []AuditEntry
+}
+
+# ---------------------------------------------------------------- the page
+
+export struct Page {
+  kind: str               # which page (app.cajux)
+  path: str
+  title: str
+  store: str              # the store's name
+  user: *User             # nil: not signed in
+  cart_count: int
+  flash: str
+  nav: []Category         # the menu: top categories with their children
+  form: map[str]str       # the values sent, shown again with the errors
+  errors: map[str]str
+  next: str               # where to go after signing in
+  home: *HomeData
+  search: *Search
+  product: *ProductData
+  cart: *Cart
+  checkout: *Checkout
+  order: *Order
+  account: *Account
+  admin: *Admin
+}
+
+# ---------------------------------------------------------------- formatting
+
+# R$ 1.234,56
+export fn money(cents: int) -> str {
+  neg := cents < 0
+  if neg { cents = -cents }
+  whole := str(cents / 100)
+  c := cents % 100
+  out := ""
+  n := len(whole)
+  for i := 0; i < n; i++ {
+    if i > 0 && (n - i) % 3 == 0 { out = out + "." }
+    out = out + whole[i:i + 1]
+  }
+  cs := str(c)
+  if c < 10 { cs = "0" + cs }
+  if neg { return "-R$ " + out + "," + cs }
+  return "R$ " + out + "," + cs
+}
+
+# cents as reais for a form field: 1234 -> "12,34"
+export fn reais(cents: int) -> str {
+  if cents <= 0 { return "" }
+  c := cents % 100
+  cs := str(c)
+  if c < 10 { cs = "0" + cs }
+  return str(cents / 100) + "," + cs
+}
+
+# "12,34", "12.34", "1.234,5", "R$ 12" -> cents; -1 when it is not a price
+export fn parse_reais(s: str) -> int {
+  s = strings.trim_space(strings.replace_all(s, "R$", ""))
+  if s == "" { return -1 }
+  # with a comma, dots are thousands; without one, a dot followed by 1 or 2 digits is the decimal point
+  comma := strings.last_index(s, ",")
+  intpart := s
+  frac := ""
+  if comma >= 0 {
+    intpart = strings.replace_all(s[0:comma], ".", "")
+    frac = s[comma + 1:]
+  } else {
+    dot := strings.last_index(s, ".")
+    if dot >= 0 && len(s) - dot - 1 <= 2 {
+      intpart = strings.replace_all(s[0:dot], ".", "")
+      frac = s[dot + 1:]
+    } else {
+      intpart = strings.replace_all(s, ".", "")
+    }
+  }
+  if intpart == "" { intpart = "0" }
+  if len(frac) > 2 { return -1 }
+  if len(frac) == 1 { frac = frac + "0" }
+  if frac == "" { frac = "00" }
+  total := 0
+  for i := 0; i < len(intpart); i++ {
+    ch := int(intpart[i])
+    if ch < '0' || ch > '9' { return -1 }
+    total = total * 10 + (ch - '0')
+    if total > 100000000 { return -1 }
+  }
+  for i := 0; i < 2; i++ {
+    ch := int(frac[i])
+    if ch < '0' || ch > '9' { return -1 }
+  }
+  return total * 100 + (int(frac[0]) - '0') * 10 + (int(frac[1]) - '0')
+}
+
+# the price a product sells for
+export fn current(p: Product) -> int {
+  if p.sale > 0 && p.sale < p.price { return p.sale }
+  return p.price
+}
+
+export fn on_sale(p: Product) -> bool { return p.sale > 0 && p.sale < p.price }
+
+# percent off, rounded
+export fn off(p: Product) -> int {
+  if !on_sale(p) { return 0 }
+  return ((p.price - p.sale) * 100 + p.price / 2) / p.price
+}
+
+export fn status_label(s: str) -> str {
+  switch s {
+  case "pending": return "Aguardando pagamento"
+  case "paid": return "Pago"
+  case "shipped": return "Enviado"
+  case "delivered": return "Entregue"
+  case "canceled": return "Cancelado"
+  }
+  return s
+}
+
+export fn role_label(s: str) -> str {
+  switch s {
+  case "admin": return "Administrador"
+  case "operator": return "Operador"
+  }
+  return "Cliente"
+}
+
+export fn plural(n: int, one: str, many: str) -> str {
+  if n == 1 { return "1 " + one }
+  return str(n) + " " + many
+}
+
+# 12345678 -> "12345-678"
+export fn cep(s: str) -> str {
+  d := digits(s)
+  if len(d) != 8 { return s }
+  return d[0:5] + "-" + d[5:]
+}
+
+export fn digits(s: str) -> str {
+  out := strings.Builder{}
+  for i := 0; i < len(s); i++ {
+    ch := int(s[i])
+    if ch >= '0' && ch <= '9' { out.write(s[i:i + 1]) }
+  }
+  return out.string()
+}
+
+# a value for a URL's query
+export fn esc(s: str) -> str {
+  out := strings.Builder{}
+  hexd := "0123456789ABCDEF"
+  for i := 0; i < len(s); i++ {
+    ch := int(s[i])
+    if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.' || ch == '~' {
+      out.write(s[i:i + 1])
+    } else if ch == ' ' {
+      out.write("+")
+    } else {
+      out.write("%" + hexd[ch / 16:ch / 16 + 1] + hexd[ch % 16:ch % 16 + 1])
+    }
+  }
+  return out.string()
+}
+
+# the search's URL with its filters, one of them changed (key "": as it is); a change other than
+# the page goes back to page 1
+export fn search_url(s: *Search, key: str, value: str) -> str {
+  vals := map[str]str{"q": s.q, "categoria": s.category, "min": s.min, "max": s.max, "sort": s.sort, "page": ""}
+  if s.page > 1 { vals["page"] = str(s.page) }
+  if s.sale { vals["promo"] = "1" } else { vals["promo"] = "" }
+  if s.stock { vals["estoque"] = "1" } else { vals["estoque"] = "" }
+  if key != "" {
+    vals[key] = value
+    if key != "page" { vals["page"] = "" }
+  }
+  if vals["sort"] == "relevance" { vals["sort"] = "" }
+  if vals["page"] == "1" { vals["page"] = "" }
+  base := s.base
+  if strings.has_prefix(base, "/categoria/") {
+    # in a category's page, another category is another page
+    if vals["categoria"] != "" && "/categoria/" + vals["categoria"] != base { base = "/categoria/" + vals["categoria"] }
+    vals["categoria"] = ""
+  }
+  return query_url(base, vals, []str{"q", "categoria", "min", "max", "promo", "estoque", "sort", "page"})
+}
+
+# a listing's URL in the panel, one value changed
+export fn listing_url(l: Listing, base: str, key: str, value: str) -> str {
+  vals := map[str]str{"q": l.q, "f": l.filter, "f2": l.filter2, "sort": l.sort, "page": ""}
+  if l.page > 1 { vals["page"] = str(l.page) }
+  if key != "" {
+    vals[key] = value
+    if key != "page" { vals["page"] = "" }
+  }
+  if vals["page"] == "1" { vals["page"] = "" }
+  return query_url(base, vals, []str{"q", "f", "f2", "sort", "page"})
+}
+
+fn query_url(base: str, vals: map[str]str, order: []str) -> str {
+  out := base
+  sep := "?"
+  for _, k := range order {
+    if vals[k] != "" {
+      out = out + sep + k + "=" + esc(vals[k])
+      sep = "&"
+    }
+  }
+  return out
+}
+
+export fn can_edit(u: *User) -> bool { return u != nil && u.role == "admin" }
+export fn is_staff(u: *User) -> bool { return u != nil && (u.role == "admin" || u.role == "operator") }

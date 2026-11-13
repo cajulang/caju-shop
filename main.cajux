@@ -1,0 +1,10 @@
+# The browser: takes over the page the server rendered, with the same data.
+import ui "../caju-ui/ui"
+import "std/json"
+import "./model"
+import "./app"
+
+let page = model.Page{}
+err := json.unmarshal(ui.data(), &page)
+if err != nil { print("page data: " + err.Error()) }
+ui.hydrate("#app", <app.App page={page} />)

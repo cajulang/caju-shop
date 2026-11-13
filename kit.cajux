@@ -1,0 +1,395 @@
+# The pieces every page uses: the shell (the cart's count and the toasts, shared by context), the
+# calls to the server's API, the header with the search and its suggestions, the product card,
+# prices, form fields, breadcrumbs and pagination.
+import ui "../caju-ui/ui"
+import style "../caju-style/style"
+import "std/strings"
+import "std/strconv"
+import "std/json"
+import "./model"
+
+# ---------------------------------------------------------------- the shell
+
+export struct Shell {
+  count: *ui.IntState     # the cart's count in the header
+  toast: *ui.StrState     # a message that shows for a few seconds
+  tone: *ui.StrState      # "ok" or "error"
+}
+
+export let SHELL = ui.create_context(nil)
+
+export fn shell() -> *Shell { return ui.use_context(SHELL).(*Shell) }
+
+export fn notify(s: *Shell, msg: str, tone: str) {
+  s.tone.set(tone)
+  s.toast.set(msg)
+  ui.set_timeout(3200, fn() { s.toast.set("") })
+}
+
+# ---------------------------------------------------------------- talking to the server
+
+# a request to the server from the browser (page function "api" in public/shop.js): done gets the
+# HTTP status and the body
+export fn api(method: str, url: str, body: str, done: fn(int, str)) {
+  ui.call("api", method + "\n" + url + "\n" + body, fn(reply: str) {
+    i := strings.index(reply, "\n")
+    if i < 0 {
+      done(0, "")
+      return
+    }
+    code, _ := strconv.atoi(reply[0:i])
+    done(code, reply[i + 1:])
+  })
+}
+
+# the "error" of a JSON reply, or a generic message
+export fn error_of(body: str) -> str {
+  v, err := json.parse(body)
+  if err == nil {
+    e := v.get_str("error", "")
+    if e != "" { return e }
+  }
+  return "Não foi possível falar com a loja. Tente de novo."
+}
+
+# a form body: key=value&...
+export fn form(pairs: []str) -> str {
+  out := []str{}
+  for i := 0; i + 1 < len(pairs); i += 2 { out = append(out, pairs[i] + "=" + model.esc(pairs[i + 1])) }
+  return strings.join(out, "&")
+}
+
+export fn visit(url: str) { ui.call("go", url, fn(r: str) {}) }
+
+# ---------------------------------------------------------------- styles shared by the pages
+
+export let container = style.def("page-width", "mx-auto w-full max-w-[1200px] px-4 sm:px-6")
+export let button = style.def("button", "inline-flex h-10 cursor-pointer items-center justify-center gap-2 rounded-lg border border-transparent px-4 text-sm font-semibold whitespace-nowrap transition-colors disabled:cursor-not-allowed disabled:opacity-50")
+export let button_primary = style.def("button-primary", "@button bg-primary text-primary-foreground hover:bg-primary-hover")
+export let button_accent = style.def("button-accent", "@button bg-accent text-accent-foreground hover:bg-accent/90")
+export let button_ghost = style.def("button-ghost", "@button border-border bg-card text-foreground hover:bg-muted")
+export let button_danger = style.def("button-danger", "@button border-danger/30 bg-card text-danger hover:bg-danger-soft")
+export let button_small = style.def("button-small", "@button-ghost h-8 px-3 text-[13px]")
+export let button_large = style.def("button-large", "@button-primary h-12 px-6 text-base")
+export let link = style.def("link", "font-medium text-primary underline-offset-4 hover:underline")
+export let muted_text = style.def("muted-text", "text-sm text-muted-foreground")
+export let page_title = style.def("page-title", "text-3xl font-bold sm:text-4xl")
+export let section_title = style.def("section-title", "text-2xl font-bold")
+export let card = style.def("card", "rounded-xl border bg-card p-5 shadow-[0_1px_2px_rgb(42_29_21/0.05)]")
+export let badge = style.def("badge", "inline-flex w-fit items-center rounded-full bg-muted px-2.5 py-0.5 text-xs font-semibold text-muted-foreground")
+export let badge_sale = style.def("badge-sale", "@badge bg-sale text-white")
+export let badge_ok = style.def("badge-ok", "@badge bg-ok-soft text-ok")
+export let badge_warn = style.def("badge-warn", "@badge bg-warn-soft text-warn")
+export let badge_danger = style.def("badge-danger", "@badge bg-danger-soft text-danger")
+export let badge_info = style.def("badge-info", "@badge bg-info-soft text-info")
+export let alert_error = style.def("alert-error", "rounded-lg border border-danger/25 bg-danger-soft px-4 py-3 text-sm text-danger")
+export let alert_ok = style.def("alert-ok", "rounded-lg border border-ok/25 bg-ok-soft px-4 py-3 text-sm text-ok")
+export let alert_warn = style.def("alert-warn", "rounded-lg border border-warn/25 bg-warn-soft px-4 py-3 text-sm text-warn")
+export let table = style.def("table", "w-full border-collapse text-sm [&_th]:border-b [&_th]:px-3 [&_th]:py-2.5 [&_th]:text-left [&_th]:text-xs [&_th]:font-semibold [&_th]:tracking-wide [&_th]:text-muted-foreground [&_th]:uppercase [&_td]:border-b [&_td]:px-3 [&_td]:py-2.5 [&_td]:align-middle [&_tr:last-child_td]:border-b-0")
+export let table_wrap = style.def("table-wrap", "overflow-x-auto rounded-xl border bg-card")
+export let num_cell = style.def("num-cell", "text-right tabular-nums whitespace-nowrap")
+export let stack = style.def("stack", "flex flex-col gap-4")
+export let row = style.def("row", "flex flex-wrap items-center gap-3")
+
+export fn status_badge(s: str) -> *ui.Node {
+  cls := badge
+  switch s {
+  case "pending": cls = badge_warn
+  case "paid": cls = badge_info
+  case "shipped": cls = badge_info
+  case "delivered": cls = badge_ok
+  case "canceled": cls = badge_danger
+  }
+  return <span class={cls} data-status={s}>{model.status_label(s)}</span>
+}
+
+# ---------------------------------------------------------------- icons
+
+fn icon(path: str, size: int) -> *ui.Node {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d={path} />
+    </svg>
+  )
+}
+
+export fn icon_cart(size: int) -> *ui.Node { return icon("M3 3h2l2.4 12.2a2 2 0 0 0 2 1.6h8.8a2 2 0 0 0 2-1.6L22 7H6M9 21h.01M18 21h.01", size) }
+export fn icon_search(size: int) -> *ui.Node { return icon("M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.3-4.3", size) }
+export fn icon_user(size: int) -> *ui.Node { return icon("M20 21a8 8 0 0 0-16 0M12 13a5 5 0 1 0 0-10 5 5 0 0 0 0 10z", size) }
+export fn icon_plus(size: int) -> *ui.Node { return icon("M12 5v14M5 12h14", size) }
+export fn icon_minus(size: int) -> *ui.Node { return icon("M5 12h14", size) }
+export fn icon_trash(size: int) -> *ui.Node { return icon("M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6", size) }
+export fn icon_up(size: int) -> *ui.Node { return icon("M18 15l-6-6-6 6", size) }
+export fn icon_down(size: int) -> *ui.Node { return icon("M6 9l6 6 6-6", size) }
+export fn icon_check(size: int) -> *ui.Node { return icon("M20 6 9 17l-5-5", size) }
+export fn icon_truck(size: int) -> *ui.Node { return icon("M3 7h11v9H3zM14 10h4l3 3v3h-7M7 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM17 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4z", size) }
+
+let logo_mark = style.def("logo-mark", "size-9 shrink-0")
+
+export fn logo() -> *ui.Node {
+  return (
+    <svg class={logo_mark} viewBox="0 0 64 64" aria-hidden="true">
+      <path d="M32 6c9 0 18 8 18 20 0 14-9 22-18 22S14 40 14 26C14 14 23 6 32 6z" fill="#b8232e" />
+      <path d="M26 48c-2 6 0 10 6 10s9-3 8-8c-4 1-9 0-14-2z" fill="#8a5a2b" />
+      <path d="M32 6c3-4 9-5 13-3-3 4-8 5-13 3z" fill="#2f5d3a" />
+      <ellipse cx="25" cy="22" rx="4" ry="7" fill="#fff" opacity=".35" />
+    </svg>
+  )
+}
+
+# ---------------------------------------------------------------- prices and pictures
+
+let price_now = style.def("price-now", "text-lg font-bold text-foreground tabular-nums")
+let price_now_sale = style.def("price-now-sale", "@price-now text-sale")
+let price_old = style.def("price-old", "text-sm text-muted-foreground tabular-nums line-through")
+let price_box = style.def("price-box", "flex flex-wrap items-baseline gap-x-2")
+
+export fn price(p: model.Product) -> *ui.Node {
+  if model.on_sale(p) {
+    return (
+      <div class={price_box}>
+        <span class={price_now_sale}>{model.money(p.sale)}</span>
+        <span class={price_old}>{model.money(p.price)}</span>
+      </div>
+    )
+  }
+  return <div class={price_box}><span class={price_now}>{model.money(p.price)}</span></div>
+}
+
+export fn image_url(id: int, hue: int) -> str { return "/img/p/" + str(id) + "-" + str(hue) + ".svg" }
+
+# ---------------------------------------------------------------- adding to the cart
+
+let add_form = style.def("add-form", "flex items-center gap-2")
+let qty_input = style.def("qty-input", "h-10 w-16 rounded-lg border border-input bg-card px-2 text-center tabular-nums")
+
+export struct AddToCartProps {
+  product: model.Product
+  big: bool               # the product page's: with a quantity
+}
+
+# a form that works without the program (POST /carrinho); with it, the item goes in without
+# leaving the page and the header's count changes
+export fn AddToCart(p: AddToCartProps) -> *ui.Node {
+  sh := shell()
+  busy := ui.use_bool(false)
+  qty := ui.use_int(1)
+  if p.product.stock <= 0 {
+    return <button class={button_ghost} disabled={true}>Esgotado</button>
+  }
+  submit := fn() {
+    if busy.v { return }
+    busy.set(true)
+    api("POST", "/api/carrinho", form([]str{"product_id", str(p.product.id), "qty", str(qty.v)}), fn(code: int, body: str) {
+      busy.set(false)
+      if code == 200 {
+        v, _ := json.parse(body)
+        sh.count.set(v.get_int("count", sh.count.v))
+        notify(sh, p.product.name + " foi para o carrinho.", "ok")
+      } else {
+        notify(sh, error_of(body), "error")
+      }
+    })
+  }
+  label := "Adicionar"
+  if p.big { label = "Adicionar ao carrinho" }
+  if busy.v { label = "Adicionando…" }
+  cls := button_primary
+  if p.big { cls = button_large }
+  qty_box := ui.empty()
+  if p.big {
+    qty_box = (
+      <input class={qty_input} type="number" name="qty" min="1" max={p.product.stock} value={str(qty.v)} aria-label="Quantidade"
+        onInput={fn(e: *ui.Event) {
+          n, err := strconv.atoi(e.value)
+          if err == nil && n > 0 { qty.set(n) }
+        }} />
+    )
+  }
+  return (
+    <form class={add_form} method="post" action="/carrinho" onSubmit={fn() { submit() }}>
+      <input type="hidden" name="product_id" value={str(p.product.id)} />
+      {qty_box}
+      <button class={cls} type="submit" disabled={busy.v} data-add={p.product.slug}>{icon_cart(18)}{label}</button>
+    </form>
+  )
+}
+
+# ---------------------------------------------------------------- the product card
+
+let product_card = style.def("product-card", "relative flex flex-col overflow-hidden rounded-xl border bg-card transition-shadow hover:shadow-[0_8px_24px_rgb(42_29_21/0.10)] [&:hover_img]:[scale:1.03]")
+let product_image = style.def("product-image", "aspect-square w-full bg-muted object-cover transition-transform duration-300")
+let product_body = style.def("product-body", "flex flex-1 flex-col gap-2 p-4")
+let product_category = style.def("product-category", "text-xs font-semibold tracking-wide text-accent uppercase")
+let product_name = style.def("product-name", "line-clamp-2 min-h-[2.6em] text-[15px] leading-snug font-semibold text-foreground after:absolute after:inset-0")
+let product_foot = style.def("product-foot", "relative z-10 mt-auto flex flex-col gap-3 pt-1")
+let product_tag = style.def("product-tag", "absolute top-3 left-3 z-10 flex gap-1.5")
+let image_box = style.def("image-box", "overflow-hidden")
+let stock_low = style.def("stock-low", "text-xs font-medium text-warn")
+
+export struct ProductCardProps {
+  product: model.Product
+}
+
+export fn ProductCard(p: ProductCardProps) -> *ui.Node {
+  pr := p.product
+  tags := []*ui.Node{}
+  if model.on_sale(pr) { tags = append(tags, <span class={badge_sale}>-{model.off(pr)}%</span>) }
+  if pr.stock == 0 { tags = append(tags, <span class={badge}>Esgotado</span>) }
+  low := ui.empty()
+  if pr.stock > 0 && pr.stock <= 5 { low = <span class={stock_low}>Últimas {pr.stock} unidades</span> }
+  return (
+    <article class={product_card} data-product={pr.slug}>
+      <div class={product_tag}>{tags}</div>
+      <div class={image_box}><img class={product_image} src={image_url(pr.id, pr.hue)} alt="" loading="lazy" width="400" height="400" /></div>
+      <div class={product_body}>
+        <span class={product_category}>{pr.category}</span>
+        <a class={product_name} href={"/produto/" + pr.slug}>{pr.name}</a>
+        <div class={product_foot}>
+          {price(pr)}
+          {low}
+          <AddToCart product={pr} big={false} />
+        </div>
+      </div>
+    </article>
+  )
+}
+
+export let product_grid = style.def("product-grid", "grid grid-cols-2 gap-3 sm:gap-5 md:grid-cols-3 lg:grid-cols-4")
+
+# ---------------------------------------------------------------- form fields
+
+let field_box = style.def("field", "flex flex-col gap-1.5")
+export let field_label = style.def("field-label", "text-sm font-semibold text-foreground")
+let field_input = style.def("field-input", "h-10 w-full rounded-lg border border-input bg-card px-3 text-[15px] text-foreground transition-colors placeholder:text-muted-foreground/70 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/15 focus-visible:outline-none aria-invalid:border-danger")
+let field_area = style.def("field-area", "@field-input h-auto min-h-28 py-2 leading-relaxed")
+export let field_error = style.def("field-error", "text-[13px] font-medium text-danger")
+let field_hint = style.def("field-hint", "text-[13px] text-muted-foreground")
+export let check_box = style.def("check-box", "inline-flex cursor-pointer items-center gap-2 text-sm font-medium select-none [&_input]:size-4 [&_input]:accent-primary")
+
+export struct FieldProps {
+  label: str
+  name: str
+  value: str
+  error: str
+  kind: str               # input type; "textarea"
+  hint: str
+  required: bool
+  placeholder: str
+  autocomplete: str
+}
+
+export fn Field(p: FieldProps) -> *ui.Node {
+  kind := p.kind
+  if kind == "" { kind = "text" }
+  id := "f-" + p.name
+  control := ui.empty()
+  invalid := "false"
+  if p.error != "" { invalid = "true" }
+  if kind == "textarea" {
+    control = <textarea class={field_area} id={id} name={p.name} required={p.required} placeholder={p.placeholder} aria-invalid={invalid}>{p.value}</textarea>
+  } else {
+    control = <input class={field_input} id={id} type={kind} name={p.name} value={p.value} required={p.required} placeholder={p.placeholder} autocomplete={p.autocomplete} aria-invalid={invalid} />
+  }
+  return (
+    <div class={field_box}>
+      <label class={field_label} for={id}>{p.label}</label>
+      {control}
+      {ui.when(p.hint != "" && p.error == "", <span class={field_hint}>{p.hint}</span>)}
+      {ui.when(p.error != "", <span class={field_error}>{p.error}</span>)}
+    </div>
+  )
+}
+
+export struct SelectProps {
+  label: str
+  name: str
+  value: str
+  error: str
+  options: []str          # value, label, value, label...
+}
+
+export fn Select(p: SelectProps) -> *ui.Node {
+  id := "f-" + p.name
+  opts := []*ui.Node{}
+  for i := 0; i + 1 < len(p.options); i += 2 {
+    opts = append(opts, <option value={p.options[i]} selected={p.options[i] == p.value}>{p.options[i + 1]}</option>)
+  }
+  return (
+    <div class={field_box}>
+      <label class={field_label} for={id}>{p.label}</label>
+      <select class={field_input} id={id} name={p.name}>{opts}</select>
+      {ui.when(p.error != "", <span class={field_error}>{p.error}</span>)}
+    </div>
+  )
+}
+
+export fn checkbox(name: str, label: str, on: bool) -> *ui.Node {
+  return <label class={check_box}><input type="checkbox" name={name} value="1" checked={on} />{label}</label>
+}
+
+export let form_grid = style.def("form-grid", "grid gap-4 sm:grid-cols-2")
+export let span_2 = style.def("span-2", "sm:col-span-2")
+
+# ---------------------------------------------------------------- navigation pieces
+
+let crumbs_nav = style.def("crumbs", "flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground [&_a:hover]:text-foreground")
+
+export fn crumbs(list: []model.Crumb) -> *ui.Node {
+  items := []*ui.Node{}
+  for i, c := range list {
+    if i > 0 { items = append(items, <span aria-hidden="true">›</span>) }
+    if i == len(list) - 1 {
+      items = append(items, <span aria-current="page">{c.name}</span>)
+    } else {
+      items = append(items, <a href={c.href}>{c.name}</a>)
+    }
+  }
+  return <nav class={crumbs_nav} aria-label="Você está em">{items}</nav>
+}
+
+let pager = style.def("pager", "flex flex-wrap items-center justify-center gap-1.5 pt-6")
+let pager_link = style.def("pager-link", "inline-flex h-9 min-w-9 items-center justify-center rounded-lg border bg-card px-3 text-sm font-medium tabular-nums hover:bg-muted")
+let pager_current = style.def("pager-current", "@pager-link border-primary bg-primary text-primary-foreground hover:bg-primary")
+
+# links to the pages around the current one; url(n) is page n's address
+export fn pagination(page: int, pages: int, url: fn(int) -> str) -> *ui.Node {
+  if pages <= 1 { return ui.empty() }
+  items := []*ui.Node{}
+  if page > 1 { items = append(items, <a class={pager_link} href={url(page - 1)} rel="prev">‹ Anterior</a>) }
+  for n := 1; n <= pages; n++ {
+    if n == 1 || n == pages || (n >= page - 2 && n <= page + 2) {
+      if n == page {
+        items = append(items, <span class={pager_current} aria-current="page">{n}</span>)
+      } else {
+        items = append(items, <a class={pager_link} href={url(n)}>{n}</a>)
+      }
+    } else if n == page - 3 || n == page + 3 {
+      items = append(items, <span class={muted_text}>…</span>)
+    }
+  }
+  if page < pages { items = append(items, <a class={pager_link} href={url(page + 1)} rel="next">Próxima ›</a>) }
+  return <nav class={pager} aria-label="Páginas">{items}</nav>
+}
+
+let empty_box = style.def("empty-box", "flex flex-col items-center gap-3 rounded-xl border border-dashed bg-card px-6 py-14 text-center")
+
+export fn empty_state(title: str, text: str, action: *ui.Node) -> *ui.Node {
+  return (
+    <div class={empty_box}>
+      <h2 class={section_title}>{title}</h2>
+      <p class={muted_text}>{text}</p>
+      {action}
+    </div>
+  )
+}
+
+export fn errors_of(p: model.Page) -> map[str]str {
+  if p.errors == nil { return map[str]str{} }
+  return p.errors
+}
+
+export fn form_of(p: model.Page) -> map[str]str {
+  if p.form == nil { return map[str]str{} }
+  return p.form
+}

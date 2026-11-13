@@ -1,0 +1,77 @@
+# The root of every page: the shell (the cart's count, the toasts) and the page the server chose
+# (model.Page.kind). The server renders it to HTML; the browser hydrates the same tree.
+import ui "../caju-ui/ui"
+import "./model"
+import "./kit"
+import "./layout"
+import "./pages/home"
+import "./pages/catalog"
+import "./pages/cart"
+import "./pages/account"
+import "./pages/admin_catalog"
+import "./pages/admin_sales"
+
+export struct AppProps {
+  page: model.Page
+}
+
+# the stylesheet of each page (caju style's sheets), inlined by the server in the page's <head>
+export fn sheet_of(kind: str) -> str {
+  switch kind {
+  case "home": return "home"
+  case "search", "product": return "catalog"
+  case "cart", "checkout", "order": return "cart"
+  case "login", "signup", "account", "orders", "not-found": return "account"
+  }
+  if len(kind) > 6 && kind[0:6] == "admin-" { return "admin" }
+  return ""
+}
+
+fn store_page(p: model.Page) -> *ui.Node {
+  switch p.kind {
+  case "home": return <home.Home page={p} />
+  case "search": return <catalog.SearchPage search={*p.search} />
+  case "product": return <catalog.ProductPage data={*p.product} />
+  case "cart": return <cart.CartPage cart={*p.cart} free_from={p.checkout.quote.free_from} />
+  case "checkout": return <cart.CheckoutPage data={*p.checkout} page={p} />
+  case "order": return <cart.OrderPage order={*p.order} />
+  case "login": return <account.Login page={p} />
+  case "signup": return <account.Signup page={p} />
+  case "account": return <account.AccountPage page={p} />
+  case "orders": return <account.MyOrders page={p} />
+  }
+  return account.NotFound()
+}
+
+fn admin_page(p: model.Page) -> *ui.Node {
+  switch p.kind {
+  case "admin-dashboard": return <admin_catalog.Dashboard page={p} />
+  case "admin-products": return <admin_catalog.Products page={p} />
+  case "admin-product": return <admin_catalog.ProductForm page={p} />
+  case "admin-categories": return <admin_catalog.Categories page={p} />
+  case "admin-sections": return <admin_catalog.Sections page={p} />
+  case "admin-section": return <admin_catalog.SectionEditor page={p} />
+  case "admin-orders": return <admin_sales.Orders page={p} />
+  case "admin-order": return <admin_sales.OrderDetail page={p} />
+  case "admin-customers": return <admin_sales.Customers page={p} />
+  case "admin-customer": return <admin_sales.CustomerDetail page={p} />
+  case "admin-coupons": return <admin_sales.Coupons page={p} />
+  case "admin-settings": return <admin_sales.Settings page={p} />
+  case "admin-audit": return <admin_sales.Audit page={p} />
+  }
+  return account.NotFound()
+}
+
+export fn App(p: AppProps) -> *ui.Node {
+  count := ui.use_int(p.page.cart_count)
+  toast := ui.use_str("")
+  tone := ui.use_str("ok")
+  sh := &kit.Shell{count: count, toast: toast, tone: tone}
+  body := ui.empty()
+  if sheet_of(p.page.kind) == "admin" {
+    body = <layout.AdminLayout page={p.page}>{admin_page(p.page)}</layout.AdminLayout>
+  } else {
+    body = <layout.StoreLayout page={p.page}>{store_page(p.page)}</layout.StoreLayout>
+  }
+  return <ui.Provider ctx={kit.SHELL} value={sh}>{body}</ui.Provider>
+}

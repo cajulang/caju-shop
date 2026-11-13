@@ -1,0 +1,136 @@
+# The server's pure helpers, and (with SHOP_TEST_DSN) the rules that need the database: the stock
+# cannot be oversold, a cancellation gives it back, coupons have limits.
+#   caju test                                   the helpers
+#   SHOP_TEST_DSN=postgres://... caju test      also against a database (it is emptied and seeded!)
+import { describe, it, skip, expect } from "std/testing"
+import "std/os"
+import "./model"
+import "./back/db"
+import "./back/auth"
+import "./back/catalog"
+import "./back/orders"
+import "./back/seed"
+
+describe("slugs and text", fn() {
+  it("make addresses from names", fn() {
+    expect(db.slugify("Doce de Leite 500 g")).to_equal("doce-de-leite-500-g")
+    expect(db.slugify("Cachaça envelhecida em umburana")).to_equal("cachaca-envelhecida-em-umburana")
+    expect(db.slugify("  Pão --- de   Açúcar!  ")).to_equal("pao-de-acucar")
+  })
+  it("escape LIKE patterns", fn() {
+    expect(db.like("50%_off")).to_equal("%50\\%\\_off%")
+  })
+})
+
+describe("the search's words", fn() {
+  it("become a prefix tsquery, without the accents", fn() {
+    expect(catalog.ts_query("Doce de leite")).to_equal("doce:* & de:* & leite:*")
+    expect(catalog.ts_query("cachaça")).to_equal("cachaca:*")
+  })
+  it("cannot break the tsquery's syntax", fn() {
+    expect(catalog.ts_query("a & b | !c:* (d)")).to_equal("a:* & b:* & c:* & d:*")
+    expect(catalog.ts_query("  ")).to_equal("")
+  })
+})
+
+describe("passwords", fn() {
+  it("are checked against their hash, salted", fn() {
+    h := auth.hash_password("segredo123")
+    expect(h).to_start_with("pbkdf2$")
+    expect(auth.check_password("segredo123", h)).to_be_true()
+    expect(auth.check_password("segredo124", h)).to_be_false()
+    expect(auth.hash_password("segredo123") == h).to_be_false()
+    expect(auth.check_password("x", "lixo")).to_be_false()
+  })
+  it("tokens are 64 hex characters, never repeated", fn() {
+    a := auth.token()
+    expect(len(a)).to_equal(64)
+    expect(a == auth.token()).to_be_false()
+  })
+})
+
+# ---------------------------------------------------------------- against the database
+
+let DSN = os.getenv("SHOP_TEST_DSN")
+
+fn dbit(title: str, body: fn()) {
+  if DSN == "" {
+    skip(title, body)
+    return
+  }
+  it(title, body)
+}
+
+let ready = false
+
+fn fresh() {
+  if ready { return }
+  db.use(DSN)
+  seed.reset()
+  db.migrate("sql")
+  seed.run()
+  ready = true
+}
+
+fn customer(email: str) -> int { return db.scalar_int("select id from customers where email = $1", []any{email}) }
+
+describe("orders (database)", fn() {
+  dbit("the last unit goes to one buyer only", fn() {
+    fresh()
+    pid := db.scalar_int("select id from products where active order by id limit 1", []any{})
+    db.exec("update products set stock = 1 where id = $1", []any{pid})
+    a := customer("cliente@emporiocaju.dev")
+    b := db.scalar_int("select id from customers where role = 'customer' and id <> $1 order by id limit 1", []any{a})
+    cart_a := auth.cart_of_customer(a)
+    cart_b := auth.cart_of_customer(b)
+    db.exec("delete from cart_items where cart_id in ($1, $2)", []any{cart_a, cart_b})
+    expect(orders.cart_add(cart_a, pid, 1)).to_equal("")
+    expect(orders.cart_add(cart_b, pid, 1)).to_equal("")
+    expect(orders.cart_add(cart_b, pid, 1)).to_contain("Só há 1")
+    addr_a := orders.addresses(a)[0].id
+    addr_b := orders.addresses(b)[0].id
+    id1, p1 := orders.place(a, cart_a, addr_a, "")
+    expect(p1).to_equal("")
+    expect(id1).to_be_greater_than(0)
+    id2, p2 := orders.place(b, cart_b, addr_b, "")
+    expect(id2).to_equal(0)
+    expect(p2).to_contain("estoque")
+    expect(db.scalar_int("select stock from products where id = $1", []any{pid})).to_equal(0)
+    # cancelling gives the unit back
+    expect(orders.set_status(id1, "canceled", "teste", "", 0)).to_equal("")
+    expect(db.scalar_int("select stock from products where id = $1", []any{pid})).to_equal(1)
+    expect(orders.set_status(id1, "paid", "", "", 0)).to_contain("não pode")
+  })
+  dbit("a coupon applies its rules", fn() {
+    fresh()
+    d, err := orders.coupon_discount("bemvindo10", 10000)
+    expect(err).to_equal("")
+    expect(d).to_equal(1000)
+    _, e2 := orders.coupon_discount("CAJU20", 1000)
+    expect(e2).to_contain("a partir de")
+    _, e3 := orders.coupon_discount("NATAL2024", 10000)
+    expect(e3).to_contain("expirou")
+    _, e4 := orders.coupon_discount("NADA", 10000)
+    expect(e4).to_contain("inválido")
+  })
+  dbit("shipping comes from the CEP's range, free above the threshold", fn() {
+    fresh()
+    m, price, days := orders.shipping("50030-230", 1000)
+    expect(m).to_equal("Nordeste")
+    expect(price).to_equal(1590)
+    expect(days).to_equal(4)
+    _, free, _ := orders.shipping("50030-230", 30000)
+    expect(free).to_equal(0)
+    none, _, _ := orders.shipping("123", 1000)
+    expect(none).to_equal("")
+  })
+  dbit("the search finds words, stems and typos", fn() {
+    fresh()
+    s := catalog.search(catalog.Filters{q: "cachacas"}, "/busca")
+    expect(s.total).to_be_greater_than(0)
+    t := catalog.search(catalog.Filters{q: "queijo", stock: true, sort: "price-asc"}, "/busca")
+    for i := 1; i < len(t.products); i++ { expect(model.current(t.products[i]) >= model.current(t.products[i - 1])).to_be_true() }
+    u := catalog.search(catalog.Filters{q: "cocda"}, "/busca")
+    expect(u.total).to_be_greater_than(0)
+  })
+})

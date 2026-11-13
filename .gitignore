@@ -1,0 +1,17 @@
+.ui/
+dist/
+pkg/
+tmp/
+/server
+/shop
+public/shop.css
+public/css/
+# generated from the .cajux files
+*.caju
+!model.caju
+!theme.caju
+!shop_css.caju
+!back/*.caju
+!tools/*.caju
+!*_test.caju
+node_modules/

@@ -1,0 +1,90 @@
+# The home: a banner, the departments and the sections the panel arranges.
+import ui "../caju-ui/ui"
+import style "../caju-style/style"
+import "./model"
+import "./kit"
+
+let SHEET = style.sheet("home")
+
+let hero = style.def("home-hero", "relative overflow-hidden rounded-2xl bg-ink px-6 py-10 text-ink-foreground sm:px-12 sm:py-14")
+let hero_title = style.def("home-hero-title", "max-w-xl font-serif text-4xl leading-[1.05] font-bold text-ink-foreground sm:text-5xl")
+let hero_text = style.def("home-hero-text", "mt-4 max-w-lg text-base text-ink-foreground/80 sm:text-lg")
+let hero_actions = style.def("home-hero-actions", "mt-7 flex flex-wrap gap-3")
+let hero_ghost = style.def("home-hero-ghost", "@button border-white/25 text-ink-foreground hover:bg-white/10")
+let hero_art = style.def("home-hero-art", "pointer-events-none absolute -right-10 -bottom-16 hidden w-[340px] opacity-90 md:block")
+let perks = style.def("home-perks", "mt-6 grid gap-3 sm:grid-cols-3")
+let perk = style.def("home-perk", "flex items-center gap-3 rounded-xl border bg-card px-4 py-3 text-sm [&_strong]:block [&_strong]:text-foreground")
+let perk_icon = style.def("home-perk-icon", "inline-flex size-10 shrink-0 items-center justify-center rounded-full bg-accent-soft text-accent")
+let dept_grid = style.def("home-departments", "mt-10 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5")
+let dept = style.def("home-department", "flex flex-col gap-1 rounded-xl border bg-card p-4 transition-colors hover:border-primary/40 hover:bg-accent-soft/40 hover:text-primary")
+let dept_name = style.def("home-department-name", "font-serif text-lg font-bold")
+let section_box = style.def("home-section", "mt-12")
+let section_head = style.def("home-section-head", "mb-5 flex flex-wrap items-end justify-between gap-2")
+
+fn cashew_art() -> *ui.Node {
+  return (
+    <svg class={hero_art} viewBox="0 0 200 200" aria-hidden="true">
+      <path d="M100 18c30 0 58 26 58 66 0 46-28 72-58 72S42 130 42 84c0-40 28-66 58-66z" fill="#b8232e" />
+      <path d="M82 154c-6 20 0 32 20 32s30-10 26-26c-14 4-30 2-46-6z" fill="#a0672f" />
+      <path d="M100 18c10-14 30-17 44-10-10 14-28 17-44 10z" fill="#3f7a4d" />
+      <ellipse cx="78" cy="68" rx="12" ry="22" fill="#fff" opacity=".25" />
+    </svg>
+  )
+}
+
+export struct HomeProps {
+  page: model.Page
+}
+
+export fn Home(p: HomeProps) -> *ui.Node {
+  data := p.page.home
+  depts := []*ui.Node{}
+  for _, c := range data.categories {
+    depts = append(depts, (
+      <a key={c.id} class={dept} href={"/categoria/" + c.slug}>
+        <span class={dept_name}>{c.name}</span>
+        <span class={kit.muted_text}>{model.plural(c.products, "produto", "produtos")}</span>
+      </a>
+    ))
+  }
+  sections := []*ui.Node{}
+  for _, s := range data.sections {
+    if len(s.products) == 0 { continue }
+    cards := []*ui.Node{}
+    for i, pr := range s.products {
+      if i >= 8 { break }
+      cards = append(cards, ui.keyed(pr.id, <kit.ProductCard product={pr} />))
+    }
+    sections = append(sections, (
+      <section key={s.id} class={section_box} aria-labelledby={"s" + str(s.id)}>
+        <div class={section_head}>
+          <div>
+            <h2 class={kit.section_title} id={"s" + str(s.id)}>{s.title}</h2>
+            <p class={kit.muted_text}>{s.subtitle}</p>
+          </div>
+        </div>
+        <div class={kit.product_grid}>{cards}</div>
+      </section>
+    ))
+  }
+  return (
+    <div class={kit.container}>
+      <section class={hero}>
+        <h1 class={hero_title}>O sabor do Nordeste, direto de quem faz.</h1>
+        <p class={hero_text}>Cocadas de tacho, cachaças de alambique, queijo coalho do agreste e artesanato feito à mão. Frete grátis a partir de R$ 250.</p>
+        <div class={hero_actions}>
+          <a class={kit.button_large} href="/busca?promo=1">Ver promoções</a>
+          <a class={hero_ghost} href="/busca">Todos os produtos</a>
+        </div>
+        {cashew_art()}
+      </section>
+      <div class={perks}>
+        <div class={perk}><span class={perk_icon}>{kit.icon_truck(20)}</span><span><strong>Entrega para todo o Brasil</strong>Prazo e frete calculados pelo CEP</span></div>
+        <div class={perk}><span class={perk_icon}>{kit.icon_check(20)}</span><span><strong>De pequenos produtores</strong>Engenhos, alambiques e ateliês do sertão</span></div>
+        <div class={perk}><span class={perk_icon}>{kit.icon_cart(20)}</span><span><strong>Cupom BEMVINDO10</strong>10% na primeira compra</span></div>
+      </div>
+      <nav class={dept_grid} aria-label="Departamentos">{depts}</nav>
+      {sections}
+    </div>
+  )
+}

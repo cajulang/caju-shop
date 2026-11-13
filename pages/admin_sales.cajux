@@ -1,0 +1,410 @@
+# The panel: orders (list, detail, status), customers, coupons, settings (the store, shipping, the
+# team) and the audit log.
+import ui "../caju-ui/ui"
+import style "../caju-style/style"
+import "./model"
+import "./kit"
+import "./pages/cart"
+import "./pages/admin_catalog"
+
+let SHEET = style.sheet("admin")
+
+let panel = style.def("admin-sales-panel", "@card flex flex-col gap-4")
+let panel_title = style.def("admin-sales-title", "text-lg font-bold")
+let detail_grid = style.def("admin-detail-grid", "grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px] xl:items-start")
+let facts = style.def("admin-facts", "grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm [&_dt]:text-muted-foreground [&_dd]:font-medium")
+let rate_form = style.def("admin-rate", "grid items-end gap-2 sm:grid-cols-[minmax(0,1.2fr)_1fr_1fr_0.8fr_0.6fr_auto_auto] [&_input]:h-9 [&_input]:w-full [&_input]:rounded-md [&_input]:border [&_input]:border-input [&_input]:bg-card [&_input]:px-2 [&_input]:text-sm [&_label]:text-xs [&_label]:font-semibold [&_label]:text-muted-foreground")
+
+
+# ---------------------------------------------------------------- orders
+
+
+export struct OrdersProps {
+  page: model.Page
+}
+
+export fn Orders(p: OrdersProps) -> *ui.Node {
+  a := p.page.admin
+  l := a.listing
+  rows := []*ui.Node{}
+  for _, o := range a.orders {
+    rows = append(rows, (
+      <tr key={o.id}>
+        <td><a class={kit.link} href={"/admin/pedidos/" + str(o.id)}>#{o.id}</a></td>
+        <td>{o.created}</td>
+        <td><a href={"/admin/clientes/" + str(o.customer_id)}>{o.customer}</a><br /><span class={kit.muted_text}>{o.address.city}/{o.address.state}</span></td>
+        <td class={kit.num_cell}>{o.items}</td>
+        <td>{kit.status_badge(o.status)}</td>
+        <td class={kit.num_cell}>{model.money(o.total)}</td>
+      </tr>
+    ))
+  }
+  return (
+    <div>
+      <admin_catalog.ListingBar base="/admin/pedidos" listing={l} placeholder="Número, cliente ou e-mail"
+        filters={[]str{"", "Todas as situações", "pending", "Aguardando pagamento", "paid", "Pagos (para enviar)", "shipped", "Enviados", "delivered", "Entregues", "canceled", "Cancelados"}}
+        filters2={[]str{"", "Qualquer data", "today", "Hoje", "7d", "Últimos 7 dias", "30d", "Últimos 30 dias"}}
+        sorts={[]str{"", "Mais recentes", "oldest", "Mais antigos", "total", "Maior valor"}}
+        actions={[]*ui.Node{}} />
+      <p class={kit.muted_text} style="margin-bottom:.75rem">{model.plural(l.total, "pedido", "pedidos")} · página {l.page} de {l.pages}</p>
+      <div class={kit.table_wrap}>
+        <table class={kit.table}>
+          <thead><tr><th>Pedido</th><th>Data</th><th>Cliente</th><th class={kit.num_cell}>Itens</th><th>Situação</th><th class={kit.num_cell}>Total</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+      {admin_catalog.pages_of(l, "/admin/pedidos")}
+    </div>
+  )
+}
+
+fn status_action(s: str) -> str {
+  switch s {
+  case "paid": return "Confirmar pagamento"
+  case "shipped": return "Marcar como enviado"
+  case "delivered": return "Marcar como entregue"
+  case "canceled": return "Cancelar pedido"
+  }
+  return s
+}
+
+fn next_statuses(s: str) -> []str {
+  switch s {
+  case "pending": return []str{"paid", "canceled"}
+  case "paid": return []str{"shipped", "canceled"}
+  case "shipped": return []str{"delivered"}
+  }
+  return []str{}
+}
+
+export struct OrderDetailProps {
+  page: model.Page
+}
+
+export fn OrderDetail(p: OrderDetailProps) -> *ui.Node {
+  o := p.page.admin.order
+  e := kit.errors_of(p.page)
+  actions := []*ui.Node{}
+  for _, s := range next_statuses(o.status) {
+    cls := kit.button_primary
+    if s == "canceled" { cls = kit.button_danger }
+    extra := ui.empty()
+    if s == "shipped" { extra = <kit.Field label="Código de rastreio" name="tracking" value="" error={e["tracking"]} placeholder="BR123456789NE" /> }
+    actions = append(actions, (
+      <form key={s} class={kit.stack} method="post" action={"/admin/pedidos/" + str(o.id) + "/situacao"} style="gap:.6rem">
+        <input type="hidden" name="status" value={s} />
+        {extra}
+        <kit.Field label="Observação (opcional)" name="note" value="" />
+        <button class={cls} type="submit" data-to={s}>{status_action(s)}</button>
+      </form>
+    ))
+  }
+  if len(actions) == 0 { actions = append(actions, <p class={kit.muted_text}>Este pedido está encerrado.</p>) }
+  return (
+    <div class={kit.stack}>
+      <a class={kit.link} href="/admin/pedidos">← Pedidos</a>
+      {ui.when(e["form"] != "", <div class={kit.alert_error} role="alert">{e["form"]}</div>)}
+      <div class={detail_grid}>
+        <cart.OrderView order={*o} admin={true} />
+        <div class={kit.stack}>
+          <section class={panel}>
+            <h2 class={panel_title}>Cliente</h2>
+            <dl class={facts}><dt>Nome</dt><dd><a class={kit.link} href={"/admin/clientes/" + str(o.customer_id)}>{o.customer}</a></dd><dt>E-mail</dt><dd>{o.email}</dd></dl>
+          </section>
+          <section class={panel}>
+            <h2 class={panel_title}>Mudar a situação</h2>
+            {actions}
+          </section>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+# ---------------------------------------------------------------- customers
+
+export struct CustomersProps {
+  page: model.Page
+}
+
+export fn Customers(p: CustomersProps) -> *ui.Node {
+  a := p.page.admin
+  l := a.listing
+  rows := []*ui.Node{}
+  for _, c := range a.customers {
+    state := ui.empty()
+    if c.blocked { state = <span class={kit.badge_danger}>Bloqueado</span> }
+    rows = append(rows, (
+      <tr key={c.id}>
+        <td><a class={kit.link} href={"/admin/clientes/" + str(c.id)}>{c.name}</a> {state}<br /><span class={kit.muted_text}>{c.email}</span></td>
+        <td>{c.phone}</td>
+        <td>{c.created}</td>
+        <td class={kit.num_cell}>{c.orders}</td>
+        <td class={kit.num_cell}>{model.money(c.spent)}</td>
+      </tr>
+    ))
+  }
+  return (
+    <div>
+      <admin_catalog.ListingBar base="/admin/clientes" listing={l} placeholder="Nome, e-mail ou celular"
+        filters={[]str{"", "Todos", "buyers", "Com pedidos", "blocked", "Bloqueados"}}
+        filters2={[]str{}}
+        sorts={[]str{"", "Mais recentes", "name", "Nome", "spent", "Mais gastaram", "orders", "Mais pedidos"}}
+        actions={[]*ui.Node{}} />
+      <p class={kit.muted_text} style="margin-bottom:.75rem">{model.plural(l.total, "cliente", "clientes")} · página {l.page} de {l.pages}</p>
+      <div class={kit.table_wrap}>
+        <table class={kit.table}>
+          <thead><tr><th>Cliente</th><th>Celular</th><th>Desde</th><th class={kit.num_cell}>Pedidos</th><th class={kit.num_cell}>Total gasto</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+      {admin_catalog.pages_of(l, "/admin/clientes")}
+    </div>
+  )
+}
+
+export struct CustomerDetailProps {
+  page: model.Page
+}
+
+export fn CustomerDetail(p: CustomerDetailProps) -> *ui.Node {
+  a := p.page.admin
+  c := a.customer
+  editor := model.can_edit(p.page.user)
+  orders := []*ui.Node{}
+  for _, o := range a.orders {
+    orders = append(orders, <tr key={o.id}><td><a class={kit.link} href={"/admin/pedidos/" + str(o.id)}>#{o.id}</a></td><td>{o.created}</td><td>{kit.status_badge(o.status)}</td><td class={kit.num_cell}>{model.money(o.total)}</td></tr>)
+  }
+  addrs := []*ui.Node{}
+  for _, ad := range a.addresses { addrs = append(addrs, <p key={ad.id} class={kit.muted_text}>{ad.street}, {ad.number} · {ad.district} · {ad.city}/{ad.state} · {ad.cep}</p>) }
+  block_label := "Bloquear cliente"
+  if c.blocked { block_label = "Desbloquear cliente" }
+  return (
+    <div class={kit.stack}>
+      <a class={kit.link} href="/admin/clientes">← Clientes</a>
+      <div class={detail_grid}>
+        <section class={panel}>
+          <h2 class={panel_title}>Pedidos</h2>
+          <div class={kit.table_wrap}><table class={kit.table}><tbody>{orders}</tbody></table></div>
+          {ui.when(len(orders) == 0, <p class={kit.muted_text}>Nenhum pedido.</p>)}
+        </section>
+        <div class={kit.stack}>
+          <section class={panel}>
+            <h2 class={panel_title}>{c.name}</h2>
+            {ui.when(c.blocked, <span class={kit.badge_danger}>Bloqueado: não consegue entrar</span>)}
+            <dl class={facts}>
+              <dt>E-mail</dt><dd>{c.email}</dd>
+              <dt>Celular</dt><dd>{c.phone}</dd>
+              <dt>Cliente desde</dt><dd>{c.created}</dd>
+              <dt>Pedidos</dt><dd>{c.orders}</dd>
+              <dt>Total gasto</dt><dd>{model.money(c.spent)}</dd>
+            </dl>
+            {ui.when(editor, <form method="post" action={"/admin/clientes/" + str(c.id) + "/bloquear"}><button class={kit.button_danger} type="submit">{block_label}</button></form>)}
+          </section>
+          <section class={panel}>
+            <h2 class={panel_title}>Endereços</h2>
+            {addrs}
+          </section>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+# ---------------------------------------------------------------- coupons
+
+fn coupon_value(c: model.Coupon) -> str {
+  if c.kind == "percent" { return str(c.value) + "%" }
+  return model.money(c.value)
+}
+
+export struct CouponsProps {
+  page: model.Page
+}
+
+export fn Coupons(p: CouponsProps) -> *ui.Node {
+  a := p.page.admin
+  e := kit.errors_of(p.page)
+  f := kit.form_of(p.page)
+  rows := []*ui.Node{}
+  for _, c := range a.coupons {
+    uses := str(c.used)
+    if c.max_uses > 0 { uses = uses + " de " + str(c.max_uses) }
+    expires := "não expira"
+    if c.expires != "" { expires = c.expires }
+    state := <span class={kit.badge_ok}>Ativo</span>
+    if !c.active { state = <span class={kit.badge}>Inativo</span> }
+    min_text := "—"
+    if c.min > 0 { min_text = model.money(c.min) }
+    rows = append(rows, (
+      <tr key={c.code}>
+        <td><strong>{c.code}</strong></td>
+        <td>{coupon_value(c)}</td>
+        <td class={kit.num_cell}>{min_text}</td>
+        <td class={kit.num_cell}>{uses}</td>
+        <td>{expires}</td>
+        <td>{state}</td>
+        <td><form method="post" action={"/admin/cupons/" + c.code + "/alternar"}><button class={kit.button_small} type="submit">{toggle_label(c.active)}</button></form></td>
+      </tr>
+    ))
+  }
+  kind := f["kind"]
+  if kind == "" { kind = "percent" }
+  return (
+    <div class={kit.stack}>
+      <div class={kit.table_wrap}>
+        <table class={kit.table}>
+          <thead><tr><th>Código</th><th>Desconto</th><th class={kit.num_cell}>Mínimo</th><th class={kit.num_cell}>Usos</th><th>Validade</th><th>Situação</th><th></th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+      <section class={panel}>
+        <h2 class={panel_title}>Novo cupom</h2>
+        <form class={kit.stack} method="post" action="/admin/cupons">
+          <div class={kit.form_grid}>
+            <kit.Field label="Código" name="code" value={f["code"]} error={e["code"]} placeholder="BEMVINDO10" required={true} />
+            <kit.Select label="Tipo" name="kind" value={kind} options={[]str{"percent", "Percentual (%)", "fixed", "Valor fixo (R$)"}} />
+            <kit.Field label="Desconto" name="value" value={f["value"]} error={e["value"]} placeholder="10 ou 15,00" required={true} />
+            <kit.Field label="Compra mínima (R$)" name="min" value={f["min"]} error={e["min"]} placeholder="opcional" />
+            <kit.Field label="Limite de usos" name="max_uses" kind="number" value={f["max_uses"]} placeholder="sem limite" />
+            <kit.Field label="Válido até" name="expires" kind="date" value={f["expires"]} error={e["expires"]} />
+          </div>
+          {kit.checkbox("active", "Ativo", true)}
+          <div><button class={kit.button_primary} type="submit">Criar cupom</button></div>
+        </form>
+      </section>
+    </div>
+  )
+}
+
+fn toggle_label(active: bool) -> str {
+  if active { return "Desativar" }
+  return "Ativar"
+}
+
+# ---------------------------------------------------------------- settings
+
+export struct SettingsProps {
+  page: model.Page
+}
+
+export fn Settings(p: SettingsProps) -> *ui.Node {
+  a := p.page.admin
+  e := kit.errors_of(p.page)
+  st := a.settings
+  rates := []*ui.Node{}
+  for _, r := range a.rates {
+    rates = append(rates, (
+      <div key={r.id} class={kit.row} style="align-items:end">
+        <form class={rate_form} method="post" action={"/admin/fretes/" + str(r.id)} style="flex:1">
+          <label>Região<input name="name" value={r.name} /></label>
+          <label>CEP inicial<input name="cep_from" value={r.cep_from} /></label>
+          <label>CEP final<input name="cep_to" value={r.cep_to} /></label>
+          <label>Preço (R$)<input name="price" value={model.reais(r.price)} placeholder="0,00" /></label>
+          <label>Dias<input name="days" type="number" value={str(r.days)} /></label>
+          <button class={kit.button_small} type="submit">Salvar</button>
+        </form>
+        <form method="post" action={"/admin/fretes/" + str(r.id) + "/remover"}><button class={kit.button_small} type="submit" aria-label={"Remover " + r.name}>{kit.icon_trash(14)}</button></form>
+      </div>
+    ))
+  }
+  staff := []*ui.Node{}
+  for _, s := range a.staff {
+    staff = append(staff, (
+      <tr key={s.id}>
+        <td><strong>{s.name}</strong><br /><span class={kit.muted_text}>{s.email}</span></td>
+        <td>
+          <form class={kit.row} method="post" action={"/admin/equipe/" + str(s.id)}>
+            <select name="role" aria-label="Papel" style="height:2rem;border:1px solid var(--input);border-radius:.4rem;padding:0 .4rem">
+              <option value="admin" selected={s.role == "admin"}>Administrador</option>
+              <option value="operator" selected={s.role == "operator"}>Operador</option>
+              <option value="customer">Tirar do painel</option>
+            </select>
+            <button class={kit.button_small} type="submit">Salvar</button>
+          </form>
+        </td>
+      </tr>
+    ))
+  }
+  free := ""
+  if st["free_shipping_cents"] != "" && st["free_shipping_cents"] != "0" { free = model.reais(atoi(st["free_shipping_cents"])) }
+  return (
+    <div class={kit.stack}>
+      {ui.when(e["form"] != "", <div class={kit.alert_error} role="alert">{e["form"]}</div>)}
+      <section class={panel}>
+        <h2 class={panel_title}>Loja</h2>
+        <form class={kit.stack} method="post" action="/admin/configuracoes">
+          <div class={kit.form_grid}>
+            <kit.Field label="Nome da loja" name="store_name" value={st["store_name"]} error={e["store_name"]} required={true} />
+            <kit.Field label="Frete grátis a partir de (R$)" name="free_shipping" value={free} error={e["free_shipping"]} hint="Em branco: sem frete grátis" />
+          </div>
+          <div><button class={kit.button_primary} type="submit">Salvar</button></div>
+        </form>
+      </section>
+      <section class={panel}>
+        <h2 class={panel_title}>Frete por faixa de CEP</h2>
+        {rates}
+        <h3 style="font-weight:700;margin-top:.5rem">Nova faixa</h3>
+        <form class={rate_form} method="post" action="/admin/fretes">
+          <label>Região<input name="name" required={true} /></label>
+          <label>CEP inicial<input name="cep_from" placeholder="00000-000" required={true} /></label>
+          <label>CEP final<input name="cep_to" placeholder="99999-999" required={true} /></label>
+          <label>Preço (R$)<input name="price" placeholder="0,00" required={true} /></label>
+          <label>Dias<input name="days" type="number" required={true} /></label>
+          <button class={kit.button_small} type="submit">Adicionar</button>
+        </form>
+      </section>
+      <section class={panel}>
+        <h2 class={panel_title}>Equipe do painel</h2>
+        <p class={kit.muted_text}>Administradores mexem em tudo. Operadores veem o painel, cuidam dos pedidos e do estoque, mas não mudam o catálogo, os cupons nem as configurações.</p>
+        <div class={kit.table_wrap}><table class={kit.table}><tbody>{staff}</tbody></table></div>
+        <form class={kit.row} method="post" action="/admin/equipe" style="align-items:end">
+          <div style="flex:1;min-width:16rem"><kit.Field label="Dar acesso a (e-mail de um cliente cadastrado)" name="email" kind="email" value="" error={e["email"]} required={true} /></div>
+          <select name="role" aria-label="Papel" style="height:2.5rem;border:1px solid var(--input);border-radius:.5rem;padding:0 .5rem">
+            <option value="operator">Operador</option>
+            <option value="admin">Administrador</option>
+          </select>
+          <button class={kit.button_primary} type="submit">Dar acesso</button>
+        </form>
+      </section>
+    </div>
+  )
+}
+
+fn atoi(s: str) -> int {
+  n := 0
+  for i := 0; i < len(s); i++ {
+    ch := int(s[i])
+    if ch >= '0' && ch <= '9' { n = n * 10 + (ch - '0') }
+  }
+  return n
+}
+
+# ---------------------------------------------------------------- the audit log
+
+export struct AuditProps {
+  page: model.Page
+}
+
+export fn Audit(p: AuditProps) -> *ui.Node {
+  a := p.page.admin
+  l := a.listing
+  rows := []*ui.Node{}
+  for i, en := range a.audit {
+    target := en.entity
+    if en.entity_id != "" { target = target + " #" + en.entity_id }
+    rows = append(rows, <tr key={i}><td style="white-space:nowrap">{en.at}</td><td>{en.actor}</td><td><strong>{en.action}</strong> {target}</td><td>{en.detail}</td></tr>)
+  }
+  return (
+    <div>
+      <admin_catalog.ListingBar base="/admin/auditoria" listing={l} placeholder="Ação, pessoa ou detalhe" filters={[]str{}} filters2={[]str{}} sorts={[]str{}} actions={[]*ui.Node{}} />
+      <div class={kit.table_wrap}>
+        <table class={kit.table}>
+          <thead><tr><th>Quando</th><th>Quem</th><th>O quê</th><th>Detalhe</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+      {admin_catalog.pages_of(l, "/admin/auditoria")}
+    </div>
+  )
+}

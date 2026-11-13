@@ -1,0 +1,157 @@
+# Signing in and up, the customer's account (data and addresses) and their orders.
+import ui "../caju-ui/ui"
+import style "../caju-style/style"
+import "./model"
+import "./kit"
+import "./pages/cart"
+
+let SHEET = style.sheet("account")
+
+let auth_box = style.def("auth-box", "@card mx-auto mt-4 flex w-full max-w-md flex-col gap-5 p-7")
+let auth_foot = style.def("auth-foot", "text-center text-sm text-muted-foreground")
+let demo_note = style.def("demo-note", "rounded-lg bg-muted px-4 py-3 text-[13px] text-muted-foreground [&_code]:font-semibold [&_code]:text-foreground")
+let account_grid = style.def("account-grid", "mt-6 grid gap-6 lg:grid-cols-2 lg:items-start")
+let address_card = style.def("account-address", "flex items-start justify-between gap-3 rounded-lg border p-3 text-sm")
+let order_row = style.def("account-order", "flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-card p-4 hover:border-primary/40")
+
+export struct AuthProps {
+  page: model.Page
+}
+
+export struct LoginProps {
+  page: model.Page
+}
+
+export fn Login(p: LoginProps) -> *ui.Node {
+  f := kit.form_of(p.page)
+  e := kit.errors_of(p.page)
+  return (
+    <div class={kit.container}>
+      <form class={auth_box} method="post" action="/entrar">
+        <h1 class={kit.page_title}>Entrar</h1>
+        {ui.when(e["form"] != "", <div class={kit.alert_error} role="alert">{e["form"]}</div>)}
+        <input type="hidden" name="next" value={p.page.next} />
+        <kit.Field label="E-mail" name="email" kind="email" value={f["email"]} error={e["email"]} autocomplete="email" required={true} />
+        <kit.Field label="Senha" name="password" kind="password" value="" error={e["password"]} autocomplete="current-password" required={true} />
+        <button class={kit.button_large} type="submit">Entrar</button>
+        <p class={auth_foot}>Ainda não tem conta? <a class={kit.link} href={"/cadastro?next=" + model.esc(p.page.next)}>Cadastre-se</a></p>
+        <p class={demo_note}>Para testar: cliente <code>cliente@emporiocaju.dev</code> / <code>cliente123</code>; painel <code>admin@emporiocaju.dev</code> / <code>admin123</code>.</p>
+      </form>
+    </div>
+  )
+}
+
+export struct SignupProps {
+  page: model.Page
+}
+
+export fn Signup(p: SignupProps) -> *ui.Node {
+  f := kit.form_of(p.page)
+  e := kit.errors_of(p.page)
+  return (
+    <div class={kit.container}>
+      <form class={auth_box} method="post" action="/cadastro">
+        <h1 class={kit.page_title}>Criar conta</h1>
+        <input type="hidden" name="next" value={p.page.next} />
+        <kit.Field label="Nome" name="name" value={f["name"]} error={e["name"]} autocomplete="name" required={true} />
+        <kit.Field label="E-mail" name="email" kind="email" value={f["email"]} error={e["email"]} autocomplete="email" required={true} />
+        <kit.Field label="Celular" name="phone" kind="tel" value={f["phone"]} error={e["phone"]} autocomplete="tel" placeholder="(81) 99999-0000" />
+        <kit.Field label="Senha" name="password" kind="password" value="" error={e["password"]} autocomplete="new-password" required={true} hint="Pelo menos 8 caracteres." />
+        <button class={kit.button_large} type="submit">Criar conta</button>
+        <p class={auth_foot}>Já tem conta? <a class={kit.link} href={"/entrar?next=" + model.esc(p.page.next)}>Entrar</a></p>
+      </form>
+    </div>
+  )
+}
+
+export struct AccountPageProps {
+  page: model.Page
+}
+
+export fn AccountPage(p: AccountPageProps) -> *ui.Node {
+  a := p.page.account
+  f := kit.form_of(p.page)
+  e := kit.errors_of(p.page)
+  name := a.name
+  phone := a.phone
+  if f["name"] != "" { name = f["name"] }
+  if f["phone"] != "" { phone = f["phone"] }
+  addrs := []*ui.Node{}
+  for _, ad := range a.addresses {
+    label := ad.label
+    if label == "" { label = "Endereço" }
+    addrs = append(addrs, (
+      <div key={ad.id} class={address_card}>
+        <span><strong>{label}</strong><br />{ad.street}, {ad.number} · {ad.district} · {ad.city}/{ad.state} · {ad.cep}</span>
+        <form method="post" action={"/conta/enderecos/" + str(ad.id) + "/remover"}><button class={kit.button_small} type="submit">Remover</button></form>
+      </div>
+    ))
+  }
+  if len(addrs) == 0 { addrs = append(addrs, <p class={kit.muted_text}>Nenhum endereço ainda.</p>) }
+  return (
+    <div class={kit.container}>
+      <div class={kit.row}>
+        <h1 class={kit.page_title}>Minha conta</h1>
+        <a class={kit.button_ghost} href="/conta/pedidos" style="margin-left:auto">Meus pedidos</a>
+        <form method="post" action="/sair"><button class={kit.button_ghost} type="submit">Sair</button></form>
+      </div>
+      <div class={account_grid}>
+        <form class={kit.card} method="post" action="/conta">
+          <div class={kit.stack}>
+            <h2 class={kit.section_title}>Seus dados</h2>
+            <kit.Field label="Nome" name="name" value={name} error={e["name"]} required={true} />
+            <kit.Field label="E-mail" name="email_ro" value={a.email} hint="O e-mail não pode ser trocado." />
+            <kit.Field label="Celular" name="phone" kind="tel" value={phone} error={e["phone"]} />
+            <kit.Field label="Nova senha" name="password" kind="password" value="" error={e["password"]} hint="Deixe em branco para manter a atual." autocomplete="new-password" />
+            <button class={kit.button_primary} type="submit">Salvar</button>
+          </div>
+        </form>
+        <div class={kit.card}>
+          <div class={kit.stack}>
+            <h2 class={kit.section_title}>Endereços</h2>
+            {addrs}
+            <form method="post" action="/conta/enderecos">
+              <input type="hidden" name="next" value="/conta" />
+              <h3 style="margin:.5rem 0 1rem;font-weight:700">Novo endereço</h3>
+              <cart.AddressFields form={f} errors={e} />
+              <button class={kit.button_accent} type="submit" style="margin-top:1rem">Adicionar endereço</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export struct MyOrdersProps {
+  page: model.Page
+}
+
+export fn MyOrders(p: MyOrdersProps) -> *ui.Node {
+  list := []*ui.Node{}
+  for _, o := range p.page.account.orders {
+    list = append(list, (
+      <a key={o.id} class={order_row} href={"/pedidos/" + str(o.id)}>
+        <span><strong>Pedido #{o.id}</strong><br /><span class={kit.muted_text}>{o.created} · {model.plural(o.items, "item", "itens")}</span></span>
+        {kit.status_badge(o.status)}
+        <strong class={kit.num_cell}>{model.money(o.total)}</strong>
+      </a>
+    ))
+  }
+  body := <div class={kit.stack} style="margin-top:1.5rem">{list}</div>
+  if len(list) == 0 { body = <div style="margin-top:1.5rem">{kit.empty_state("Nenhum pedido ainda", "Seus pedidos aparecem aqui.", <a class={kit.button_primary} href="/">Ir às compras</a>)}</div> }
+  return (
+    <div class={kit.container}>
+      <h1 class={kit.page_title}>Meus pedidos</h1>
+      {body}
+    </div>
+  )
+}
+
+export fn NotFound() -> *ui.Node {
+  return (
+    <div class={kit.container}>
+      {kit.empty_state("Página não encontrada", "O endereço pode ter mudado, ou o produto saiu do catálogo.", <a class={kit.button_primary} href="/">Voltar à loja</a>)}
+    </div>
+  )
+}

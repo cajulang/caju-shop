@@ -1,0 +1,167 @@
+# The database: the pool (opened at the first query, so each worker process has its own), the
+# migrations and small helpers.
+import "../caju-pg/pg"
+import "std/os"
+import "std/fs"
+import "std/strings"
+import filepath "std/path"
+
+let pool: *pg.Pool = nil
+let chosen: str = ""
+
+# uses another database from now on (the tests)
+export fn use(d: str) {
+  chosen = d
+  if pool != nil { pool.close() }
+  pool = nil
+}
+
+export fn dsn() -> str {
+  if chosen != "" { return chosen }
+  d := os.getenv("DATABASE_URL")
+  if d == "" { return "postgres://shop:shop-dev@127.0.0.1:55440/shop" }
+  return d
+}
+
+export fn get() -> *pg.Pool {
+  if pool == nil {
+    p, err := pg.open(dsn(), 8)
+    if err != nil { panic("database: " + err.Error()) }
+    pool = p
+  }
+  return pool
+}
+
+# how many queries and how long they took (PROFILE=1 prints them per page)
+let queries: int = 0
+let query_ns: int = 0
+
+# (queries, nanoseconds) since the last call
+export fn take_stats() -> (int, int) {
+  q := queries
+  ns := query_ns
+  queries = 0
+  query_ns = 0
+  return q, ns
+}
+
+export fn query(sql: str, args: []any) -> *pg.Rows {
+  t0 := os.nanotime()
+  rows, err := get().query(sql, args)
+  queries++
+  query_ns += os.nanotime() - t0
+  if err != nil { panic("query: " + err.Error() + "\n" + sql) }
+  return rows
+}
+
+# the first row, or nil
+export fn row(sql: str, args: []any) -> *pg.Rows {
+  rows := query(sql, args)
+  if !rows.next() { return nil }
+  return rows
+}
+
+export fn exec(sql: str, args: []any) -> int {
+  t0 := os.nanotime()
+  res, err := get().exec(sql, args)
+  queries++
+  query_ns += os.nanotime() - t0
+  if err != nil { panic("exec: " + err.Error() + "\n" + sql) }
+  return res.rows_affected
+}
+
+export fn scalar_int(sql: str, args: []any) -> int {
+  r := row(sql, args)
+  if r == nil { return 0 }
+  return r.get_int(r.columns[0].name)
+}
+
+export fn tx(f: fn(*pg.Conn) -> error) -> error { return get().transaction(f) }
+
+# helpers for a connection inside a transaction: a failure returns the error
+export fn must_query(c: *pg.Conn, sql: str, args: []any) -> *pg.Rows {
+  rows, err := c.query(sql, args)
+  if err != nil { panic("query: " + err.Error() + "\n" + sql) }
+  return rows
+}
+
+export fn must_exec(c: *pg.Conn, sql: str, args: []any) -> int {
+  res, err := c.exec(sql, args)
+  if err != nil { panic("exec: " + err.Error() + "\n" + sql) }
+  return res.rows_affected
+}
+
+# the SQL files of sql/ not yet applied, in order, each in a transaction
+export fn migrate(dir: str) -> []str {
+  exec("create table if not exists schema_migrations (name text primary key, applied_at timestamptz not null default now())", []any{})
+  names, err := fs.list_dir(dir)
+  if err != nil { panic("migrations: " + err.Error()) }
+  sorted := []str{}
+  for _, n := range names {
+    if strings.has_suffix(n, ".sql") { sorted = insert_sorted(sorted, n) }
+  }
+  applied := []str{}
+  for _, n := range sorted {
+    if row("select 1 from schema_migrations where name = $1", []any{n}) != nil { continue }
+    text, rerr := fs.read_file(filepath.join(dir, n))
+    if rerr != nil { panic(rerr.Error()) }
+    terr := tx(fn(c: *pg.Conn) -> error {
+      _, e := c.exec(text, []any{})
+      if e != nil { return e }
+      _, e2 := c.exec("insert into schema_migrations (name) values ($1)", []any{n})
+      return e2
+    })
+    if terr != nil { panic("migration " + n + ": " + terr.Error()) }
+    applied = append(applied, n)
+  }
+  return applied
+}
+
+fn insert_sorted(list: []str, s: str) -> []str {
+  out := []str{}
+  done := false
+  for _, x := range list {
+    if !done && s < x {
+      out = append(out, s)
+      done = true
+    }
+    out = append(out, x)
+  }
+  if !done { out = append(out, s) }
+  return out
+}
+
+# LIKE's special characters, escaped
+export fn like(s: str) -> str {
+  s = strings.replace_all(s, "\\", "\\\\")
+  s = strings.replace_all(s, "%", "\\%")
+  s = strings.replace_all(s, "_", "\\_")
+  return "%" + s + "%"
+}
+
+# a slug: lowercase ASCII letters, digits and dashes ("Doce de Leite 500 g" -> "doce-de-leite-500-g")
+export fn slugify(s: str) -> str {
+  s = strings.to_lower(fold(s))
+  out := strings.Builder{}
+  dash := false
+  for i := 0; i < len(s); i++ {
+    ch := int(s[i])
+    if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') {
+      out.write(s[i:i + 1])
+      dash = false
+    } else if !dash && out.len() > 0 {
+      out.write("-")
+      dash = true
+    }
+  }
+  r := out.string()
+  if strings.has_suffix(r, "-") { r = r[0:len(r) - 1] }
+  return r
+}
+
+# Portuguese accents to plain letters
+export fn fold(s: str) -> str {
+  pairs := []str{"á", "a", "à", "a", "â", "a", "ã", "a", "ä", "a", "é", "e", "ê", "e", "è", "e", "í", "i", "î", "i", "ó", "o", "ô", "o", "õ", "o", "ö", "o", "ú", "u", "ü", "u", "ç", "c", "Á", "A", "À", "A", "Â", "A", "Ã", "A", "É", "E", "Ê", "E", "Í", "I", "Ó", "O", "Ô", "O", "Õ", "O", "Ú", "U", "Ç", "C", "ñ", "n"}
+  for i := 0; i < len(pairs); i += 2 { s = strings.replace_all(s, pairs[i], pairs[i + 1]) }
+  return s
+}

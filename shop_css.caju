@@ -1,0 +1,22 @@
+# Writes the CSS from every style.def of the store (caju style): public/shop.css with the theme,
+# the reset and the shared styles, and public/css/<sheet>.css with each page's own styles, which
+# the server inlines in the page's <head>.
+#   caju run shop_css.caju      (tools/build.sh)
+import style "../caju-style/style"
+import css "../caju-style/css"
+import "std/fs"
+import "std/os"
+import "./theme"
+import "./app"
+
+theme.setup()
+reg := style.registry()
+for _, w := range css.unknown(reg) { os.eprintln("caju style: unknown utility in " + w) }
+fs.mkdir_all("public/css", 493)
+for name, text := range css.compile_sheets(reg) {
+  if name == "" {
+    fs.write_file("public/shop.css", css.minify(text), 420)
+  } else {
+    fs.write_file("public/css/" + name + ".css", css.minify(text), 420)
+  }
+}

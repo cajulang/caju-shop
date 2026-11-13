@@ -1,0 +1,346 @@
+# The cart, the checkout (shipping, coupons) and the orders.
+import "../caju-pg/pg"
+import "std/strings"
+import "./model"
+import "./back/db"
+import "./back/catalog"
+
+# ---------------------------------------------------------------- the cart
+
+export fn cart_view(cart_id: int) -> model.Cart {
+  c := model.Cart{lines: []model.CartLine{}, problems: []str{}}
+  if cart_id == 0 { return c }
+  rows := db.query("select ci.qty, " + catalog.product_cols() + " from cart_items ci join products p on p.id = ci.product_id join categories c on c.id = p.category_id where ci.cart_id = $1 order by ci.added_at, p.id", []any{cart_id})
+  while rows.next() {
+    p := catalog.product_of(rows)
+    q := rows.get_int("qty")
+    line := model.CartLine{product: p, qty: q, total: model.current(p) * q}
+    c.lines = append(c.lines, line)
+    c.count += q
+    c.subtotal += line.total
+    if !p.active {
+      c.problems = append(c.problems, p.name + " não está mais à venda.")
+    } else if p.stock < q {
+      if p.stock == 0 {
+        c.problems = append(c.problems, p.name + " esgotou.")
+      } else {
+        c.problems = append(c.problems, "Só há " + str(p.stock) + " unidade(s) de " + p.name + ".")
+      }
+    }
+  }
+  return c
+}
+
+export fn cart_count(cart_id: int) -> int {
+  if cart_id == 0 { return 0 }
+  return db.scalar_int("select coalesce(sum(qty), 0)::int as n from cart_items where cart_id = $1", []any{cart_id})
+}
+
+# adds qty of a product; returns an error message ("" when it went in)
+export fn cart_add(cart_id: int, product_id: int, qty: int) -> str {
+  if qty < 1 { qty = 1 }
+  p := catalog.product_by_id(product_id)
+  if p == nil || !p.active { return "Produto indisponível." }
+  have := db.scalar_int("select coalesce((select qty from cart_items where cart_id = $1 and product_id = $2), 0) as n", []any{cart_id, product_id})
+  if have + qty > p.stock {
+    if p.stock == 0 { return "Este produto esgotou." }
+    return "Só há " + str(p.stock) + " unidade(s) em estoque."
+  }
+  db.exec("insert into cart_items (cart_id, product_id, qty) values ($1, $2, $3) on conflict (cart_id, product_id) do update set qty = cart_items.qty + excluded.qty", []any{cart_id, product_id, qty})
+  db.exec("update carts set updated_at = now() where id = $1", []any{cart_id})
+  return ""
+}
+
+# sets a line's quantity (0 removes it), up to the stock
+export fn cart_set(cart_id: int, product_id: int, qty: int) -> str {
+  if qty <= 0 {
+    db.exec("delete from cart_items where cart_id = $1 and product_id = $2", []any{cart_id, product_id})
+    return ""
+  }
+  p := catalog.product_by_id(product_id)
+  if p == nil { return "Produto indisponível." }
+  msg := ""
+  if qty > p.stock {
+    qty = p.stock
+    msg = "Só há " + str(p.stock) + " unidade(s) em estoque."
+    if qty == 0 {
+      db.exec("delete from cart_items where cart_id = $1 and product_id = $2", []any{cart_id, product_id})
+      return "Este produto esgotou."
+    }
+  }
+  db.exec("update cart_items set qty = $3 where cart_id = $1 and product_id = $2", []any{cart_id, product_id, qty})
+  return msg
+}
+
+# ---------------------------------------------------------------- shipping and coupons
+
+export fn setting(key: str, def: str) -> str {
+  r := db.row("select value from settings where key = $1", []any{key})
+  if r == nil { return def }
+  return r.get_str("value")
+}
+
+export fn free_from() -> int { return catalog.atoi_or(setting("free_shipping_cents", "0"), 0) }
+
+# the shipping to a CEP: (method, price, days); method "" when it does not deliver there
+export fn shipping(cep: str, subtotal: int) -> (str, int, int) {
+  d := model.digits(cep)
+  if len(d) != 8 { return "", 0, 0 }
+  r := db.row("select name, price_cents, days from shipping_rates where $1 between cep_from and cep_to order by price_cents limit 1", []any{catalog.atoi_or(d, 0)})
+  if r == nil { return "", 0, 0 }
+  price := r.get_int("price_cents")
+  free := free_from()
+  if free > 0 && subtotal >= free { price = 0 }
+  return r.get_str("name"), price, r.get_int("days")
+}
+
+# the discount of a coupon on a subtotal, or an error message
+export fn coupon_discount(code: str, subtotal: int) -> (int, str) {
+  code = strings.to_upper(strings.trim_space(code))
+  if code == "" { return 0, "" }
+  r := db.row("select kind, value, min_cents, coalesce(max_uses, 0) as max_uses, used, active, (expires_at is not null and expires_at < now()) as expired from coupons where code = $1", []any{code})
+  if r == nil || !r.get_bool("active") { return 0, "Cupom inválido." }
+  if r.get_bool("expired") { return 0, "Este cupom expirou." }
+  if r.get_int("max_uses") > 0 && r.get_int("used") >= r.get_int("max_uses") { return 0, "Este cupom já foi usado o máximo de vezes." }
+  if subtotal < r.get_int("min_cents") { return 0, "Este cupom vale para compras a partir de " + model.money(r.get_int("min_cents")) + "." }
+  v := r.get_int("value")
+  d := v
+  if r.get_str("kind") == "percent" { d = subtotal * v / 100 }
+  if d > subtotal { d = subtotal }
+  return d, ""
+}
+
+export fn quote(cart: model.Cart, addr: *model.Address, coupon: str) -> model.Quote {
+  q := model.Quote{coupon: strings.to_upper(strings.trim_space(coupon)), free_from: free_from()}
+  if addr != nil {
+    method, price, days := shipping(addr.cep, cart.subtotal)
+    q.method = method
+    q.shipping = price
+    q.days = days
+  }
+  d, err := coupon_discount(q.coupon, cart.subtotal)
+  q.discount = d
+  q.coupon_error = err
+  q.total = cart.subtotal - q.discount + q.shipping
+  return q
+}
+
+# ---------------------------------------------------------------- addresses
+
+fn address_of(r: *pg.Rows) -> model.Address {
+  return model.Address{id: r.get_int("id"), label: r.get_str("label"), cep: model.cep(r.get_str("cep")), street: r.get_str("street"), number: r.get_str("number"), complement: r.get_str("complement"), district: r.get_str("district"), city: r.get_str("city"), state: r.get_str("state")}
+}
+
+export fn addresses(customer_id: int) -> []model.Address {
+  rows := db.query("select * from addresses where customer_id = $1 order by id", []any{customer_id})
+  out := []model.Address{}
+  while rows.next() { out = append(out, address_of(rows)) }
+  return out
+}
+
+export fn address(customer_id: int, id: int) -> *model.Address {
+  r := db.row("select * from addresses where customer_id = $1 and id = $2", []any{customer_id, id})
+  if r == nil { return nil }
+  a := address_of(r)
+  return &a
+}
+
+# checks an address form; the errors by field
+export fn check_address(f: map[str]str) -> map[str]str {
+  errs := map[str]str{}
+  if len(model.digits(f["cep"])) != 8 { errs["cep"] = "Informe um CEP com 8 dígitos." }
+  for _, k := range []str{"street", "number", "district", "city"} {
+    if strings.trim_space(f[k]) == "" { errs[k] = "Obrigatório." }
+  }
+  st := strings.to_upper(strings.trim_space(f["state"]))
+  if len(st) != 2 { errs["state"] = "Use a sigla (PE, SP...)." }
+  if len(errs) == 0 {
+    method, _, _ := shipping(f["cep"], 0)
+    if method == "" { errs["cep"] = "Ainda não entregamos neste CEP." }
+  }
+  return errs
+}
+
+export fn add_address(customer_id: int, f: map[str]str) -> int {
+  r := db.row("insert into addresses (customer_id, label, cep, street, number, complement, district, city, state) values ($1, $2, $3, $4, $5, $6, $7, $8, $9) returning id", []any{customer_id, strings.trim_space(f["label"]), model.digits(f["cep"]), strings.trim_space(f["street"]), strings.trim_space(f["number"]), strings.trim_space(f["complement"]), strings.trim_space(f["district"]), strings.trim_space(f["city"]), strings.to_upper(strings.trim_space(f["state"]))})
+  return r.get_int("id")
+}
+
+# ---------------------------------------------------------------- placing an order
+
+# turns the cart into an order, in one transaction: the products are locked (FOR UPDATE), so two
+# buyers of the last unit cannot both get it; the stock goes down, the coupon is used, the cart
+# empties. Returns the order's id, or 0 and the reason.
+export fn place(customer_id: int, cart_id: int, address_id: int, coupon: str) -> (int, str) {
+  addr := address(customer_id, address_id)
+  if addr == nil { return 0, "Escolha um endereço de entrega." }
+  cust := db.row("select name from customers where id = $1", []any{customer_id})
+  order_id := 0
+  problem := ""
+  err := db.tx(fn(c: *pg.Conn) -> error {
+    lines := db.must_query(c, "select p.id, p.name, p.stock, p.active, coalesce(p.sale_cents, p.price_cents) as unit, p.price_cents, ci.qty from cart_items ci join products p on p.id = ci.product_id where ci.cart_id = $1 order by p.id for update of p", []any{cart_id})
+    if lines.len() == 0 {
+      problem = "Seu carrinho está vazio."
+      return errors.New(problem)
+    }
+    subtotal := 0
+    while lines.next() {
+      if !lines.get_bool("active") || lines.get_int("stock") < lines.get_int("qty") {
+        problem = "Não há estoque suficiente de " + lines.get_str("name") + ". Revise o carrinho."
+        return errors.New(problem)
+      }
+      u := lines.get_int("unit")
+      if u > lines.get_int("price_cents") { u = lines.get_int("price_cents") }
+      subtotal += u * lines.get_int("qty")
+    }
+    method, ship, days := shipping(addr.cep, subtotal)
+    if method == "" {
+      problem = "Ainda não entregamos neste CEP."
+      return errors.New(problem)
+    }
+    code := strings.to_upper(strings.trim_space(coupon))
+    discount := 0
+    if code != "" {
+      locked := db.must_query(c, "select code from coupons where code = $1 for update", []any{code})
+      d, cerr := coupon_discount(code, subtotal)
+      if cerr != "" || locked.len() == 0 {
+        problem = cerr
+        if problem == "" { problem = "Cupom inválido." }
+        return errors.New(problem)
+      }
+      discount = d
+      db.must_exec(c, "update coupons set used = used + 1 where code = $1", []any{code})
+    }
+    let code_v: any = nil
+    if code != "" { code_v = code }
+    o := db.must_query(c, "insert into orders (customer_id, subtotal_cents, shipping_cents, discount_cents, total_cents, coupon_code, ship_name, ship_cep, ship_street, ship_number, ship_complement, ship_district, ship_city, ship_state, shipping_method, shipping_days) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) returning id", []any{customer_id, subtotal, ship, discount, subtotal - discount + ship, code_v, cust.get_str("name"), model.digits(addr.cep), addr.street, addr.number, addr.complement, addr.district, addr.city, addr.state, method, days})
+    o.next()
+    order_id = o.get_int("id")
+    lines.index = -1
+    while lines.next() {
+      u := lines.get_int("unit")
+      if u > lines.get_int("price_cents") { u = lines.get_int("price_cents") }
+      pid := lines.get_int("id")
+      q := lines.get_int("qty")
+      db.must_exec(c, "insert into order_items (order_id, product_id, name, unit_cents, qty) values ($1, $2, $3, $4, $5)", []any{order_id, pid, lines.get_str("name"), u, q})
+      db.must_exec(c, "update products set stock = stock - $2, updated_at = now() where id = $1", []any{pid, q})
+      db.must_exec(c, "insert into stock_moves (product_id, delta, reason, order_id, actor_id) values ($1, $2, 'Pedido', $3, $4)", []any{pid, -q, order_id, customer_id})
+    }
+    db.must_exec(c, "insert into order_events (order_id, status, note, actor_id) values ($1, 'pending', 'Pedido criado', $2)", []any{order_id, customer_id})
+    db.must_exec(c, "delete from cart_items where cart_id = $1", []any{cart_id})
+    return nil
+  })
+  if err != nil {
+    if problem == "" { panic(err.Error()) }
+    return 0, problem
+  }
+  return order_id, ""
+}
+
+# ---------------------------------------------------------------- reading orders
+
+const ORDER_COLS = "o.id, o.status, o.customer_id, cu.name as customer, cu.email, o.subtotal_cents, o.shipping_cents, o.discount_cents, o.total_cents, coalesce(o.coupon_code, '') as coupon, o.ship_name, o.ship_cep, o.ship_street, o.ship_number, o.ship_complement, o.ship_district, o.ship_city, o.ship_state, o.shipping_method, o.shipping_days, o.tracking_code, to_char(o.created_at at time zone 'America/Recife', 'DD/MM/YYYY HH24:MI') as created, (select coalesce(sum(qty), 0)::int from order_items oi where oi.order_id = o.id) as items"
+
+export fn order_cols() -> str { return ORDER_COLS }
+
+export fn order_of(r: *pg.Rows) -> model.Order {
+  return model.Order{
+    id: r.get_int("id"), status: r.get_str("status"), customer_id: r.get_int("customer_id"), customer: r.get_str("customer"), email: r.get_str("email"),
+    subtotal: r.get_int("subtotal_cents"), shipping: r.get_int("shipping_cents"), discount: r.get_int("discount_cents"), total: r.get_int("total_cents"),
+    coupon: r.get_str("coupon"), items: r.get_int("items"), ship_name: r.get_str("ship_name"), method: r.get_str("shipping_method"), days: r.get_int("shipping_days"),
+    tracking: r.get_str("tracking_code"), created: r.get_str("created"), lines: []model.OrderLine{}, events: []model.OrderEvent{},
+    address: model.Address{cep: model.cep(r.get_str("ship_cep")), street: r.get_str("ship_street"), number: r.get_str("ship_number"), complement: r.get_str("ship_complement"), district: r.get_str("ship_district"), city: r.get_str("ship_city"), state: r.get_str("ship_state")},
+  }
+}
+
+export fn orders_of(rows: *pg.Rows) -> []model.Order {
+  out := []model.Order{}
+  while rows.next() { out = append(out, order_of(rows)) }
+  return out
+}
+
+# an order with its lines and history; customer_id 0 reads any (the panel)
+export fn order(id: int, customer_id: int) -> *model.Order {
+  r := db.row("select " + ORDER_COLS + " from orders o join customers cu on cu.id = o.customer_id where o.id = $1 and ($2 = 0 or o.customer_id = $2)", []any{id, customer_id})
+  if r == nil { return nil }
+  o := order_of(r)
+  lines := db.query("select oi.product_id, p.slug, oi.name, oi.unit_cents, oi.qty, p.hue from order_items oi join products p on p.id = oi.product_id where oi.order_id = $1 order by oi.name", []any{id})
+  while lines.next() {
+    o.lines = append(o.lines, model.OrderLine{product_id: lines.get_int("product_id"), slug: lines.get_str("slug"), name: lines.get_str("name"), unit: lines.get_int("unit_cents"), qty: lines.get_int("qty"), total: lines.get_int("unit_cents") * lines.get_int("qty"), hue: lines.get_int("hue")})
+  }
+  evs := db.query("select e.status, e.note, coalesce(c.name, '') as actor, to_char(e.created_at at time zone 'America/Recife', 'DD/MM/YYYY HH24:MI') as at from order_events e left join customers c on c.id = e.actor_id where e.order_id = $1 order by e.id", []any{id})
+  while evs.next() {
+    o.events = append(o.events, model.OrderEvent{status: evs.get_str("status"), note: evs.get_str("note"), actor: evs.get_str("actor"), at: evs.get_str("at")})
+  }
+  if o.status == "pending" { o.pix = pix_code(o.id, o.total) }
+  return &o
+}
+
+export fn customer_orders(customer_id: int) -> []model.Order {
+  return orders_of(db.query("select " + ORDER_COLS + " from orders o join customers cu on cu.id = o.customer_id where o.customer_id = $1 order by o.id desc limit 50", []any{customer_id}))
+}
+
+# a Pix "copia e cola" look-alike: a demonstration, it pays nothing
+fn pix_code(id: int, total: int) -> str {
+  return "00020126580014BR.GOV.BCB.PIX-DEMONSTRACAO-PEDIDO-" + str(id) + "-VALOR-" + model.reais(total) + "-EMPORIO-CAJU"
+}
+
+# ---------------------------------------------------------------- changing an order's status
+
+# the next statuses an order may go to
+export fn next_statuses(status: str) -> []str {
+  switch status {
+  case "pending": return []str{"paid", "canceled"}
+  case "paid": return []str{"shipped", "canceled"}
+  case "shipped": return []str{"delivered"}
+  }
+  return []str{}
+}
+
+# moves an order to a status (a cancellation gives the stock back and the coupon's use); "" ok,
+# otherwise the reason
+export fn set_status(id: int, status: str, note: str, tracking: str, actor_id: int) -> str {
+  problem := ""
+  err := db.tx(fn(c: *pg.Conn) -> error {
+    r := db.must_query(c, "select status, coupon_code from orders where id = $1 for update", []any{id})
+    if !r.next() {
+      problem = "Pedido não encontrado."
+      return errors.New(problem)
+    }
+    let actor: any = nil
+    if actor_id > 0 { actor = actor_id }
+    cur := r.get_str("status")
+    allowed := false
+    for _, s := range next_statuses(cur) {
+      if s == status { allowed = true }
+    }
+    if !allowed {
+      problem = "Um pedido " + strings.to_lower(model.status_label(cur)) + " não pode passar a " + strings.to_lower(model.status_label(status)) + "."
+      return errors.New(problem)
+    }
+    if status == "shipped" && strings.trim_space(tracking) == "" {
+      problem = "Informe o código de rastreio."
+      return errors.New(problem)
+    }
+    if status == "shipped" {
+      db.must_exec(c, "update orders set status = $2, tracking_code = $3, updated_at = now() where id = $1", []any{id, status, strings.trim_space(tracking)})
+    } else {
+      db.must_exec(c, "update orders set status = $2, updated_at = now() where id = $1", []any{id, status})
+    }
+    if status == "canceled" {
+      items := db.must_query(c, "select product_id, qty from order_items where order_id = $1", []any{id})
+      while items.next() {
+        db.must_exec(c, "update products set stock = stock + $2, updated_at = now() where id = $1", []any{items.get_int("product_id"), items.get_int("qty")})
+        db.must_exec(c, "insert into stock_moves (product_id, delta, reason, order_id, actor_id) values ($1, $2, 'Cancelamento', $3, $4)", []any{items.get_int("product_id"), items.get_int("qty"), id, actor})
+      }
+      if !r.is_null("coupon_code") { db.must_exec(c, "update coupons set used = greatest(used - 1, 0) where code = $1", []any{r.get_str("coupon_code")}) }
+    }
+    db.must_exec(c, "insert into order_events (order_id, status, note, actor_id) values ($1, $2, $3, $4)", []any{id, status, strings.trim_space(note), actor})
+    return nil
+  })
+  if err != nil {
+    if problem == "" { panic(err.Error()) }
+    return problem
+  }
+  return ""
+}

@@ -1,0 +1,1238 @@
+# The store's server: the pages (rendered with ui, hydrated by main.cajux), the forms, the JSON API
+# the program in the browser calls, the panel, the products' pictures and the build's files.
+#   ./server              serves (PORT, default 3800; DATABASE_URL; WORKERS processes)
+#   ./server migrate      applies sql/*.sql
+#   ./server seed         demonstration data      ./server reset   drops everything
+import ui "../caju-ui/ui"
+import "../caju-ui/ssr"
+import "../caju-ui/gzip"
+import "github.com/aecdanjundex/web"
+import "std/json"
+import "std/os"
+import "std/fs"
+import "std/hash"
+import "std/strings"
+import filepath "std/path"
+import "./model"
+import "./app"
+import "./back/db"
+import "./back/auth"
+import "./back/catalog"
+import "./back/orders"
+import "./back/admin"
+import "./back/images"
+import "./back/seed"
+
+# ---------------------------------------------------------------- requests
+
+# a form's fields (the first value of each); repeated fields: values()
+fn fields(c: *web.Context) -> map[str]str {
+  out := map[str]str{}
+  for k, vs := range web.parse_query(c.body()) {
+    if len(vs) > 0 { out[k] = vs[0] }
+  }
+  return out
+}
+
+fn values(c: *web.Context, key: str) -> []str {
+  vs := web.parse_query(c.body())[key]
+  if vs == nil { return []str{} }
+  return vs
+}
+
+fn ints(list: []str) -> []int {
+  out := []int{}
+  for _, s := range list {
+    for _, part := range strings.split(s, ",") {
+      n := catalog.atoi_or(strings.trim_space(part), 0)
+      if n > 0 { out = append(out, n) }
+    }
+  }
+  return out
+}
+
+fn id_param(c: *web.Context) -> int { return catalog.atoi_or(c.param("id"), 0) }
+
+# a local path to go back to (never another site)
+fn safe_next(s: str) -> str {
+  if !strings.has_prefix(s, "/") || strings.has_prefix(s, "//") || strings.contains(s, "\\") { return "" }
+  return s
+}
+
+# ---------------------------------------------------------------- pages
+
+let store_name = ""
+let store_version: int = -1
+
+fn store() -> str {
+  v := catalog.version()
+  if v != store_version {
+    store_name = orders.setting("store_name", "Empório Caju")
+    store_version = v
+  }
+  return store_name
+}
+
+# a page with what every page has: the store, the visitor, the cart's count, the message, the menu
+fn page_of(c: *web.Context, kind: str, title: str) -> model.Page {
+  s := auth.session(c)
+  p := model.Page{kind: kind, path: c.path(), title: title, store: store(), user: s.user, flash: s.flash, form: map[str]str{}, errors: map[str]str{}}
+  p.cart_count = orders.cart_count(s.cart_id)
+  if !strings.has_prefix(kind, "admin-") { p.nav = catalog.nav() }
+  return p
+}
+
+fn esc(s: str) -> str {
+  s = strings.replace_all(s, "&", "&amp;")
+  s = strings.replace_all(s, "\"", "&quot;")
+  s = strings.replace_all(s, "<", "&lt;")
+  return strings.replace_all(s, ">", "&gt;")
+}
+
+# the version of a build file for its URL (?v=), and each sheet's CSS: read once
+let versions = map[str]str{}
+let sheets = map[str]str{}
+
+fn version(file: str) -> str {
+  v, ok := versions[file]
+  if ok { return v }
+  body, err := fs.read_file(filepath.join(dist(), file))
+  v = ""
+  if err == nil { v = str(hash.crc32(body) & 0xFFFFFFFF) }
+  versions[file] = v
+  return v
+}
+
+fn sheet_css(name: str) -> str {
+  if name == "" { return "" }
+  t, ok := sheets[name]
+  if ok { return t }
+  body, err := fs.read_file(filepath.join(dist(), "css/" + name + ".css"))
+  t = ""
+  if err == nil { t = "<style>" + body + "</style>" }
+  sheets[name] = t
+  return t
+}
+
+let template_text = ""
+
+fn template() -> str {
+  if template_text == "" || os.getenv("UI_DEV") != "" {
+    t := ssr.template()
+    t = strings.replace_all(t, "href=\"/shop.css\"", "href=\"/shop.css?v=" + version("shop.css") + "\"")
+    t = strings.replace_all(t, "src=\"/shop.js\"", "src=\"/shop.js?v=" + version("shop.js") + "\"")
+    t = strings.replace_all(t, "src=\"/__ui/ui.js\"", "src=\"/__ui/ui.js?v=" + version("__ui/ui.js") + "\"")
+    template_text = t
+  }
+  return template_text
+}
+
+let profile = os.getenv("PROFILE") != ""
+
+fn render(c: *web.Context, p: model.Page, status: int) {
+  t0 := os.nanotime()
+  data, err := json.marshal(p)
+  if err != nil { panic("page data: " + err.Error()) }
+  title := p.store
+  if p.title != "" { title = p.title + " · " + p.store }
+  head := "<title>" + esc(title) + "</title>" + sheet_css(app.sheet_of(p.kind))
+  t1 := os.nanotime()
+  html := ui.page(strings.replace_all(template(), "%HEAD%", head), "#app", <app.App page={p} />, data)
+  t2 := os.nanotime()
+  c.set_header("Cache-Control", "private, no-cache")
+  if status == 200 && c.method() == "GET" && auth.cookie(c, "sid") == "" && public_kind(p.kind) {
+    # a visitor without a session sees the same page as any other: keep it, compressed once
+    e := &Cached{version: catalog.version(), html: html, gz: gzip.compress(html), tag: "\"" + str(hash.crc32(html) & 0xFFFFFFFF) + "-" + str(len(html)) + "\""}
+    if len(page_cache) >= 2000 { page_cache = map[str]*Cached{} }
+    page_cache[cache_key(c)] = e
+    serve_cached(c, e)
+  } else {
+    send(c, status, "text/html; charset=utf-8", html)
+  }
+  if profile {
+    t3 := os.nanotime()
+    nq, qns := db.take_stats()
+    os.eprintln(c.path() + ": " + str(nq) + " queries " + str(qns / 1000) + " us, json " + str((t1 - t0) / 1000) + " us, render " + str((t2 - t1) / 1000) + " us, send " + str((t3 - t2) / 1000) + " us, html " + str(len(html)) + " B")
+  }
+}
+
+# a body, gzipped when the client takes it and it is worth it
+fn send(c: *web.Context, status: int, ctype: str, body: str) {
+  c.set_header("Vary", "Accept-Encoding")
+  if len(body) > 1024 && gzip.accepted(c.header("accept-encoding")) {
+    c.set_header("Content-Encoding", "gzip")
+    c.data(status, ctype, gzip.compress_fast(body))
+    return
+  }
+  c.data(status, ctype, body)
+}
+
+# ---------------------------------------------------------------- the anonymous pages' cache
+
+struct Cached {
+  version: int
+  html: str
+  gz: str
+  tag: str
+}
+
+let page_cache = map[str]*Cached{}
+
+fn public_kind(kind: str) -> bool { return kind == "home" || kind == "search" || kind == "product" }
+
+fn cache_key(c: *web.Context) -> str { return c.request.path + "?" + c.request.query }
+
+fn serve_cached(c: *web.Context, e: *Cached) {
+  c.set_header("Cache-Control", "private, no-cache")
+  c.set_header("Vary", "Accept-Encoding, Cookie")
+  c.set_header("ETag", e.tag)
+  if c.header("if-none-match") == e.tag {
+    c.data(304, "text/html; charset=utf-8", "")
+    return
+  }
+  if gzip.accepted(c.header("accept-encoding")) {
+    c.set_header("Content-Encoding", "gzip")
+    c.data(200, "text/html; charset=utf-8", e.gz)
+    return
+  }
+  c.data(200, "text/html; charset=utf-8", e.html)
+}
+
+# a store page: from the cache for a visitor without a session, while the catalog is the same
+fn public(h: fn(*web.Context)) -> fn(*web.Context) {
+  return fn(c: *web.Context) {
+    if auth.cookie(c, "sid") == "" {
+      e, ok := page_cache[cache_key(c)]
+      if ok && e.version == catalog.version() {
+        serve_cached(c, e)
+        return
+      }
+    }
+    h(c)
+  }
+}
+
+fn not_found(c: *web.Context) {
+  p := page_of(c, "not-found", "Página não encontrada")
+  render(c, p, 404)
+}
+
+# after a form: back to a page, with a message
+fn done(c: *web.Context, msg: str, dest: str) {
+  if msg != "" { auth.flash(c, msg) }
+  c.redirect(303, dest)
+}
+
+# the same, with an error
+fn fail(c: *web.Context, msg: str, dest: str) { done(c, "!" + msg, dest) }
+
+fn json_error(c: *web.Context, status: int, msg: str) { c.json(status, map[str]any{"error": msg}) }
+
+# ---------------------------------------------------------------- guards
+
+# the signed-in customer, or a redirect to the sign-in page (nil)
+fn need_user(c: *web.Context) -> *model.User {
+  s := auth.session(c)
+  if s.user != nil { return s.user }
+  next := c.path()
+  if c.method() != "GET" { next = "/" }
+  c.redirect(303, "/entrar?next=" + model.esc(next))
+  return nil
+}
+
+fn staff_only(c: *web.Context) {
+  s := auth.session(c)
+  if s.user == nil {
+    c.redirect(303, "/entrar?next=" + model.esc(c.path()))
+    c.abort()
+    return
+  }
+  if !model.is_staff(s.user) {
+    not_found(c)
+    c.abort()
+    return
+  }
+  c.next()
+}
+
+# changes to the catalog, coupons and settings: administrators only
+fn editor_only(c: *web.Context) -> bool {
+  if model.can_edit(auth.session(c).user) { return true }
+  fail(c, "Só administradores podem fazer isso.", "/admin")
+  return false
+}
+
+fn actor(c: *web.Context) -> int { return auth.session(c).user.id }
+
+# a form posted from another site is refused (the cookie is SameSite=Lax too)
+fn same_origin(c: *web.Context) {
+  m := c.method()
+  if m == "POST" || m == "PUT" || m == "PATCH" || m == "DELETE" {
+    origin := c.header("origin")
+    if origin != "" {
+      host := c.header("host")
+      if !strings.has_suffix(origin, "://" + host) {
+        c.string(403, "origem recusada")
+        c.abort()
+        return
+      }
+    }
+  }
+  c.next()
+}
+
+# ---------------------------------------------------------------- the store
+
+fn search_filters(c: *web.Context) -> catalog.Filters {
+  return catalog.Filters{q: strings.trim_space(c.query("q")), category: c.query("categoria"), min: c.query("min"), max: c.query("max"), sale: c.query("promo") != "", stock: c.query("estoque") != "", sort: c.query("sort"), page: catalog.atoi_or(c.query("page"), 1)}
+}
+
+fn home_page(c: *web.Context) {
+  p := page_of(c, "home", "")
+  p.home = catalog.home()
+  render(c, p, 200)
+}
+
+fn search_page(c: *web.Context) {
+  f := search_filters(c)
+  p := page_of(c, "search", "Busca")
+  if f.q != "" { p.title = "Busca: " + f.q }
+  p.search = catalog.search(f, "/busca")
+  render(c, p, 200)
+}
+
+fn category_page(c: *web.Context) {
+  cat := catalog.category_by_slug(c.param("slug"))
+  if cat == nil {
+    not_found(c)
+    return
+  }
+  f := search_filters(c)
+  f.category = cat.slug
+  p := page_of(c, "search", cat.name)
+  p.search = catalog.search(f, "/categoria/" + cat.slug)
+  render(c, p, 200)
+}
+
+fn product_page(c: *web.Context) {
+  d := catalog.product_page(c.param("slug"))
+  if d == nil {
+    not_found(c)
+    return
+  }
+  p := page_of(c, "product", d.product.name)
+  p.product = d
+  render(c, p, 200)
+}
+
+fn cart_page(c: *web.Context) {
+  p := page_of(c, "cart", "Carrinho")
+  cart := orders.cart_view(auth.session(c).cart_id)
+  p.cart = &cart
+  p.checkout = &model.Checkout{quote: model.Quote{free_from: orders.free_from()}}
+  render(c, p, 200)
+}
+
+fn cart_add(c: *web.Context) {
+  f := fields(c)
+  id := auth.cart(c, true)
+  msg := orders.cart_add(id, catalog.atoi_or(f["product_id"], 0), catalog.atoi_or(f["qty"], 1))
+  if msg != "" {
+    fail(c, msg, "/carrinho")
+    return
+  }
+  done(c, "Produto adicionado ao carrinho.", "/carrinho")
+}
+
+fn cart_set(c: *web.Context) {
+  id := auth.cart(c, true)
+  msg := orders.cart_set(id, id_param(c), catalog.atoi_or(fields(c)["qty"], 0))
+  if msg != "" {
+    fail(c, msg, "/carrinho")
+    return
+  }
+  c.redirect(303, "/carrinho")
+}
+
+# the checkout: needs a signed-in customer and a cart with something in it
+fn checkout_data(c: *web.Context, user: *model.User, address_id: int, coupon: str) -> *model.Checkout {
+  cart := orders.cart_view(auth.session(c).cart_id)
+  addrs := orders.addresses(user.id)
+  if address_id == 0 && len(addrs) > 0 { address_id = addrs[len(addrs) - 1].id }
+  var_addr := orders.address(user.id, address_id)
+  if var_addr == nil && len(addrs) > 0 {
+    address_id = addrs[0].id
+    var_addr = orders.address(user.id, address_id)
+  }
+  if var_addr == nil { address_id = 0 }
+  return &model.Checkout{cart: cart, addresses: addrs, address_id: address_id, quote: orders.quote(cart, var_addr, coupon)}
+}
+
+fn checkout_page(c: *web.Context) {
+  user := need_user(c)
+  if user == nil { return }
+  d := checkout_data(c, user, catalog.atoi_or(c.query("endereco"), 0), c.query("cupom"))
+  if len(d.cart.lines) == 0 {
+    c.redirect(303, "/carrinho")
+    return
+  }
+  p := page_of(c, "checkout", "Finalizar compra")
+  p.checkout = d
+  render(c, p, 200)
+}
+
+fn checkout_post(c: *web.Context) {
+  user := need_user(c)
+  if user == nil { return }
+  f := fields(c)
+  id, problem := orders.place(user.id, auth.cart(c, true), catalog.atoi_or(f["address_id"], 0), f["coupon"])
+  if problem != "" {
+    fail(c, problem, "/finalizar")
+    return
+  }
+  catalog.touch()
+  done(c, "Pedido feito! Agora é só pagar.", "/pedidos/" + str(id))
+}
+
+fn order_page(c: *web.Context) {
+  user := need_user(c)
+  if user == nil { return }
+  o := orders.order(id_param(c), user.id)
+  if o == nil {
+    not_found(c)
+    return
+  }
+  p := page_of(c, "order", "Pedido #" + str(o.id))
+  p.order = o
+  render(c, p, 200)
+}
+
+# the customer pays (simulated) or cancels a pending order
+fn order_action(target: str) -> fn(*web.Context) {
+  return fn(c: *web.Context) {
+    user := need_user(c)
+    if user == nil { return }
+    o := orders.order(id_param(c), user.id)
+    if o == nil {
+      not_found(c)
+      return
+    }
+    if o.status != "pending" {
+      fail(c, "Este pedido não está aguardando pagamento.", "/pedidos/" + str(o.id))
+      return
+    }
+    note := "Pagamento simulado (Pix de demonstração)"
+    msg := "Pagamento confirmado. Obrigado!"
+    if target == "canceled" {
+      note = "Cancelado pelo cliente"
+      msg = "Pedido cancelado."
+    }
+    problem := orders.set_status(o.id, target, note, "", user.id)
+    if problem != "" {
+      fail(c, problem, "/pedidos/" + str(o.id))
+      return
+    }
+    if target == "canceled" { catalog.touch() }
+    done(c, msg, "/pedidos/" + str(o.id))
+  }
+}
+
+# ---------------------------------------------------------------- accounts
+
+fn login_page(c: *web.Context) {
+  if auth.session(c).user != nil {
+    c.redirect(303, "/conta")
+    return
+  }
+  p := page_of(c, "login", "Entrar")
+  p.next = safe_next(c.query("next"))
+  render(c, p, 200)
+}
+
+fn login_post(c: *web.Context) {
+  f := fields(c)
+  email := strings.to_lower(strings.trim_space(f["email"]))
+  r := db.row("select id, name, email, role, blocked, password_hash from customers where email = $1", []any{email})
+  ok := r != nil && auth.check_password(f["password"], r.get_str("password_hash"))
+  if !ok || r.get_bool("blocked") {
+    p := page_of(c, "login", "Entrar")
+    p.next = safe_next(f["next"])
+    p.form = map[str]str{"email": email}
+    p.errors = map[str]str{"form": "E-mail ou senha não conferem."}
+    if ok { p.errors["form"] = "Esta conta está bloqueada. Fale com a loja." }
+    render(c, p, 422)
+    return
+  }
+  user := &model.User{id: r.get_int("id"), name: r.get_str("name"), email: r.get_str("email"), role: r.get_str("role")}
+  auth.sign_in(c, user)
+  next := safe_next(f["next"])
+  if next == "" {
+    next = "/conta"
+    if model.is_staff(user) { next = "/admin" }
+  }
+  done(c, "Olá, " + strings.split(user.name, " ")[0] + "!", next)
+}
+
+fn signup_page(c: *web.Context) {
+  p := page_of(c, "signup", "Criar conta")
+  p.next = safe_next(c.query("next"))
+  render(c, p, 200)
+}
+
+fn valid_email(e: str) -> bool {
+  at := strings.index(e, "@")
+  return at > 0 && strings.last_index(e, ".") > at + 1 && !strings.contains(e, " ") && len(e) <= 200
+}
+
+fn signup_post(c: *web.Context) {
+  f := fields(c)
+  name := strings.trim_space(f["name"])
+  email := strings.to_lower(strings.trim_space(f["email"]))
+  errs := map[str]str{}
+  if len(name) < 3 { errs["name"] = "Informe seu nome." }
+  if !valid_email(email) { errs["email"] = "Informe um e-mail válido." }
+  if len(f["password"]) < 8 { errs["password"] = "A senha precisa de pelo menos 8 caracteres." }
+  if len(errs) == 0 && db.row("select 1 from customers where email = $1", []any{email}) != nil { errs["email"] = "Já existe uma conta com este e-mail. Entre com ela." }
+  if len(errs) > 0 {
+    p := page_of(c, "signup", "Criar conta")
+    p.next = safe_next(f["next"])
+    p.form = map[str]str{"name": name, "email": email, "phone": f["phone"]}
+    p.errors = errs
+    render(c, p, 422)
+    return
+  }
+  id := db.row("insert into customers (name, email, phone, password_hash) values ($1, $2, $3, $4) returning id", []any{name, email, strings.trim_space(f["phone"]), auth.hash_password(f["password"])}).get_int("id")
+  auth.sign_in(c, &model.User{id: id, name: name, email: email, role: "customer"})
+  next := safe_next(f["next"])
+  if next == "" { next = "/conta" }
+  done(c, "Conta criada. Bem-vindo(a)!", next)
+}
+
+fn logout(c: *web.Context) {
+  auth.sign_out(c)
+  c.redirect(303, "/")
+}
+
+fn account_page_with(c: *web.Context, user: *model.User, form: map[str]str, errs: map[str]str, status: int) {
+  r := db.row("select name, email, phone from customers where id = $1", []any{user.id})
+  p := page_of(c, "account", "Minha conta")
+  p.account = &model.Account{name: r.get_str("name"), email: r.get_str("email"), phone: r.get_str("phone"), addresses: orders.addresses(user.id), orders: []model.Order{}}
+  p.form = form
+  p.errors = errs
+  render(c, p, status)
+}
+
+fn account_page(c: *web.Context) {
+  user := need_user(c)
+  if user == nil { return }
+  account_page_with(c, user, map[str]str{}, map[str]str{}, 200)
+}
+
+fn account_post(c: *web.Context) {
+  user := need_user(c)
+  if user == nil { return }
+  f := fields(c)
+  name := strings.trim_space(f["name"])
+  errs := map[str]str{}
+  if len(name) < 3 { errs["name"] = "Informe seu nome." }
+  if f["password"] != "" && len(f["password"]) < 8 { errs["password"] = "A senha precisa de pelo menos 8 caracteres." }
+  if len(errs) > 0 {
+    account_page_with(c, user, map[str]str{"name": name, "phone": f["phone"]}, errs, 422)
+    return
+  }
+  db.exec("update customers set name = $2, phone = $3 where id = $1", []any{user.id, name, strings.trim_space(f["phone"])})
+  if f["password"] != "" { db.exec("update customers set password_hash = $2 where id = $1", []any{user.id, auth.hash_password(f["password"])}) }
+  done(c, "Dados salvos.", "/conta")
+}
+
+fn address_post(c: *web.Context) {
+  user := need_user(c)
+  if user == nil { return }
+  f := fields(c)
+  next := safe_next(f["next"])
+  if next == "" { next = "/conta" }
+  errs := orders.check_address(f)
+  if len(errs) > 0 {
+    if next == "/finalizar" {
+      p := page_of(c, "checkout", "Finalizar compra")
+      p.checkout = checkout_data(c, user, 0, "")
+      p.form = f
+      p.errors = errs
+      render(c, p, 422)
+      return
+    }
+    account_page_with(c, user, f, errs, 422)
+    return
+  }
+  id := orders.add_address(user.id, f)
+  if next == "/finalizar" { next = "/finalizar?endereco=" + str(id) }
+  done(c, "Endereço salvo.", next)
+}
+
+fn address_delete(c: *web.Context) {
+  user := need_user(c)
+  if user == nil { return }
+  db.exec("delete from addresses where id = $1 and customer_id = $2", []any{id_param(c), user.id})
+  done(c, "Endereço removido.", "/conta")
+}
+
+fn my_orders(c: *web.Context) {
+  user := need_user(c)
+  if user == nil { return }
+  p := page_of(c, "orders", "Meus pedidos")
+  p.account = &model.Account{name: user.name, email: user.email, addresses: []model.Address{}, orders: orders.customer_orders(user.id)}
+  render(c, p, 200)
+}
+
+# ---------------------------------------------------------------- the API (the program in the browser)
+
+fn api_cart_add(c: *web.Context) {
+  f := fields(c)
+  id := auth.cart(c, true)
+  msg := orders.cart_add(id, catalog.atoi_or(f["product_id"], 0), catalog.atoi_or(f["qty"], 1))
+  if msg != "" {
+    json_error(c, 409, msg)
+    return
+  }
+  c.json(200, map[str]any{"count": orders.cart_count(id)})
+}
+
+fn api_cart_set(c: *web.Context) {
+  id := auth.cart(c, true)
+  msg := orders.cart_set(id, id_param(c), catalog.atoi_or(fields(c)["qty"], 0))
+  c.json(200, map[str]any{"cart": orders.cart_view(id), "count": orders.cart_count(id), "message": msg})
+}
+
+fn api_suggest(c: *web.Context) {
+  out := []map[str]any{}
+  for _, p := range catalog.suggest(c.query("q")) {
+    out = append(out, map[str]any{"id": p.id, "slug": p.slug, "name": p.name, "price": model.current(p), "hue": p.hue})
+  }
+  c.json(200, out)
+}
+
+fn api_quote(c: *web.Context) {
+  s := auth.session(c)
+  if s.user == nil {
+    json_error(c, 401, "Entre na sua conta.")
+    return
+  }
+  d := checkout_data(c, s.user, catalog.atoi_or(c.query("endereco"), 0), c.query("cupom"))
+  c.json(200, d.quote)
+}
+
+# ---------------------------------------------------------------- the panel
+
+fn listing(c: *web.Context) -> model.Listing {
+  return model.Listing{q: c.query("q"), filter: c.query("f"), filter2: c.query("f2"), sort: c.query("sort"), page: catalog.atoi_or(c.query("page"), 1)}
+}
+
+fn admin_page(c: *web.Context, kind: str, title: str) -> model.Page {
+  p := page_of(c, kind, title)
+  p.admin = &model.Admin{settings: map[str]str{}}
+  return p
+}
+
+fn a_dashboard(c: *web.Context) {
+  p := admin_page(c, "admin-dashboard", "Início")
+  p.admin.dashboard = admin.dashboard()
+  render(c, p, 200)
+}
+
+fn a_products(c: *web.Context) {
+  p := admin_page(c, "admin-products", "Produtos")
+  l := listing(c)
+  p.admin.products = admin.product_list(&l)
+  p.admin.listing = l
+  p.admin.categories = catalog.categories_flat()
+  render(c, p, 200)
+}
+
+fn product_form(c: *web.Context, pr: *model.Product, form: map[str]str, errs: map[str]str, status: int) {
+  title := "Novo produto"
+  if pr.id > 0 { title = pr.name }
+  p := admin_page(c, "admin-product", title)
+  p.admin.product = pr
+  p.admin.categories = catalog.categories_flat()
+  p.admin.sections = admin.section_list()
+  if pr.id > 0 {
+    p.admin.moves = admin.stock_moves(pr.id)
+    p.admin.sections_of = admin.sections_of(pr.id)
+  }
+  p.form = form
+  p.errors = errs
+  render(c, p, status)
+}
+
+fn a_product_new(c: *web.Context) {
+  product_form(c, &model.Product{active: true, hue: 25}, map[str]str{}, map[str]str{}, 200)
+}
+
+fn a_product(c: *web.Context) {
+  pr := catalog.product_by_id(id_param(c))
+  if pr == nil {
+    not_found(c)
+    return
+  }
+  product_form(c, pr, map[str]str{}, map[str]str{}, 200)
+}
+
+fn a_product_create(c: *web.Context) {
+  if !editor_only(c) { return }
+  f := fields(c)
+  errs, pi := admin.check_product(f, 0, true)
+  if len(errs) > 0 {
+    product_form(c, &model.Product{active: true, hue: pi.hue}, f, errs, 422)
+    return
+  }
+  id := admin.create_product(pi, actor(c))
+  admin.set_product_sections(id, ints(values(c, "sections")))
+  auth.audit(c, "criou", "produto", str(id), pi.name)
+  done(c, "Produto criado.", "/admin/produtos/" + str(id))
+}
+
+fn a_product_update(c: *web.Context) {
+  if !editor_only(c) { return }
+  pr := catalog.product_by_id(id_param(c))
+  if pr == nil {
+    not_found(c)
+    return
+  }
+  f := fields(c)
+  errs, pi := admin.check_product(f, pr.id, false)
+  if len(errs) > 0 {
+    product_form(c, pr, f, errs, 422)
+    return
+  }
+  changes := admin.update_product(pr.id, pi)
+  admin.set_product_sections(pr.id, ints(values(c, "sections")))
+  if changes != "" { auth.audit(c, "alterou", "produto", str(pr.id), changes) }
+  done(c, "Produto salvo.", "/admin/produtos/" + str(pr.id))
+}
+
+fn a_product_stock(c: *web.Context) {
+  pr := catalog.product_by_id(id_param(c))
+  if pr == nil {
+    not_found(c)
+    return
+  }
+  f := fields(c)
+  delta := catalog.atoi_or(strings.trim_space(f["delta"]), 0)
+  problem := admin.adjust_stock(pr.id, delta, f["reason"], actor(c))
+  if problem != "" {
+    product_form(c, pr, map[str]str{}, map[str]str{"delta": problem}, 422)
+    return
+  }
+  catalog.touch()
+  auth.audit(c, "ajustou estoque", "produto", str(pr.id), str(delta) + " (" + f["reason"] + ")")
+  done(c, "Estoque ajustado.", "/admin/produtos/" + str(pr.id))
+}
+
+fn a_products_bulk(c: *web.Context) {
+  if !editor_only(c) { return }
+  f := fields(c)
+  ids := ints(values(c, "ids"))
+  if len(ids) == 0 {
+    fail(c, "Selecione pelo menos um produto.", "/admin/produtos")
+    return
+  }
+  n := admin.bulk(ids, f["action"], catalog.atoi_or(f["category_id"], 0))
+  auth.audit(c, "ação em lote: " + f["action"], "produtos", "", model.plural(n, "produto", "produtos"))
+  done(c, model.plural(n, "produto alterado", "produtos alterados") + ".", "/admin/produtos")
+}
+
+fn categories_page(c: *web.Context, form: map[str]str, errs: map[str]str, status: int) {
+  p := admin_page(c, "admin-categories", "Categorias")
+  p.admin.categories = catalog.categories_flat()
+  p.form = form
+  p.errors = errs
+  render(c, p, status)
+}
+
+fn a_categories(c: *web.Context) { categories_page(c, map[str]str{}, map[str]str{}, 200) }
+
+fn a_category_save(c: *web.Context) {
+  if !editor_only(c) { return }
+  f := fields(c)
+  id := id_param(c)
+  errs, saved := admin.save_category(id, f)
+  if len(errs) > 0 {
+    if id > 0 {
+      for _, v := range errs { errs["form"] = v }
+    }
+    categories_page(c, f, errs, 422)
+    return
+  }
+  verb := "alterou"
+  if id == 0 { verb = "criou" }
+  auth.audit(c, verb, "categoria", str(saved), strings.trim_space(f["name"]))
+  done(c, "Categoria salva.", "/admin/categorias")
+}
+
+fn a_category_delete(c: *web.Context) {
+  if !editor_only(c) { return }
+  problem := admin.delete_category(id_param(c))
+  if problem != "" {
+    categories_page(c, map[str]str{}, map[str]str{"form": problem}, 422)
+    return
+  }
+  auth.audit(c, "removeu", "categoria", str(id_param(c)), "")
+  done(c, "Categoria removida.", "/admin/categorias")
+}
+
+fn a_sections(c: *web.Context) {
+  p := admin_page(c, "admin-sections", "Seções da home")
+  p.admin.sections = admin.section_list()
+  render(c, p, 200)
+}
+
+fn a_section(c: *web.Context) {
+  s := admin.section(id_param(c))
+  if s == nil {
+    not_found(c)
+    return
+  }
+  p := admin_page(c, "admin-section", s.title)
+  p.admin.section = s
+  render(c, p, 200)
+}
+
+fn a_section_save(c: *web.Context) {
+  if !editor_only(c) { return }
+  f := fields(c)
+  id := id_param(c)
+  errs, saved := admin.save_section(id, f)
+  if len(errs) > 0 {
+    fail(c, errs["title"], "/admin/secoes")
+    return
+  }
+  auth.audit(c, "salvou", "seção", str(saved), strings.trim_space(f["title"]))
+  done(c, "Seção salva.", "/admin/secoes/" + str(saved))
+}
+
+fn a_section_products(c: *web.Context) {
+  if !editor_only(c) { return }
+  ids := ints(values(c, "ids"))
+  admin.set_section_products(id_param(c), ids)
+  auth.audit(c, "ordenou", "seção", str(id_param(c)), model.plural(len(ids), "produto", "produtos"))
+  done(c, "Produtos da seção salvos.", "/admin/secoes/" + str(id_param(c)))
+}
+
+fn a_section_delete(c: *web.Context) {
+  if !editor_only(c) { return }
+  db.exec("delete from sections where id = $1", []any{id_param(c)})
+  auth.audit(c, "removeu", "seção", str(id_param(c)), "")
+  done(c, "Seção removida.", "/admin/secoes")
+}
+
+fn a_orders(c: *web.Context) {
+  p := admin_page(c, "admin-orders", "Pedidos")
+  l := listing(c)
+  p.admin.orders = admin.order_list(&l)
+  p.admin.listing = l
+  render(c, p, 200)
+}
+
+fn order_detail(c: *web.Context, id: int, errs: map[str]str, status: int) {
+  o := orders.order(id, 0)
+  if o == nil {
+    not_found(c)
+    return
+  }
+  p := admin_page(c, "admin-order", "Pedido #" + str(id))
+  p.admin.order = o
+  p.errors = errs
+  render(c, p, status)
+}
+
+fn a_order(c: *web.Context) { order_detail(c, id_param(c), map[str]str{}, 200) }
+
+fn a_order_status(c: *web.Context) {
+  f := fields(c)
+  id := id_param(c)
+  problem := orders.set_status(id, f["status"], f["note"], f["tracking"], actor(c))
+  if problem != "" {
+    key := "form"
+    if f["status"] == "shipped" && strings.contains(problem, "rastreio") { key = "tracking" }
+    order_detail(c, id, map[str]str{key: problem}, 422)
+    return
+  }
+  if f["status"] == "canceled" { catalog.touch() }
+  auth.audit(c, "mudou situação", "pedido", str(id), model.status_label(f["status"]))
+  done(c, "Pedido: " + strings.to_lower(model.status_label(f["status"])) + ".", "/admin/pedidos/" + str(id))
+}
+
+fn a_customers(c: *web.Context) {
+  p := admin_page(c, "admin-customers", "Clientes")
+  l := listing(c)
+  p.admin.customers = admin.customer_list(&l)
+  p.admin.listing = l
+  render(c, p, 200)
+}
+
+fn a_customer(c: *web.Context) {
+  cu := admin.customer(id_param(c))
+  if cu == nil {
+    not_found(c)
+    return
+  }
+  p := admin_page(c, "admin-customer", cu.name)
+  p.admin.customer = cu
+  p.admin.orders = orders.customer_orders(cu.id)
+  p.admin.addresses = orders.addresses(cu.id)
+  render(c, p, 200)
+}
+
+fn a_customer_block(c: *web.Context) {
+  if !editor_only(c) { return }
+  id := id_param(c)
+  r := db.row("update customers set blocked = not blocked where id = $1 and role = 'customer' returning blocked", []any{id})
+  if r == nil {
+    not_found(c)
+    return
+  }
+  msg := "Cliente desbloqueado."
+  if r.get_bool("blocked") {
+    msg = "Cliente bloqueado."
+    db.exec("delete from sessions where customer_id = $1", []any{id})
+  }
+  auth.audit(c, strings.to_lower(strings.trim_suffix(msg, ".")), "cliente", str(id), "")
+  done(c, msg, "/admin/clientes/" + str(id))
+}
+
+fn coupons_page(c: *web.Context, form: map[str]str, errs: map[str]str, status: int) {
+  p := admin_page(c, "admin-coupons", "Cupons")
+  p.admin.coupons = admin.coupons()
+  p.form = form
+  p.errors = errs
+  render(c, p, status)
+}
+
+fn a_coupons(c: *web.Context) {
+  if !editor_only(c) { return }
+  coupons_page(c, map[str]str{}, map[str]str{}, 200)
+}
+
+fn a_coupon_create(c: *web.Context) {
+  if !editor_only(c) { return }
+  f := fields(c)
+  errs, code := admin.save_coupon(f, true)
+  if len(errs) > 0 {
+    coupons_page(c, f, errs, 422)
+    return
+  }
+  auth.audit(c, "criou", "cupom", code, "")
+  done(c, "Cupom " + code + " criado.", "/admin/cupons")
+}
+
+fn a_coupon_toggle(c: *web.Context) {
+  if !editor_only(c) { return }
+  code := c.param("code")
+  db.exec("update coupons set active = not active where code = $1", []any{code})
+  auth.audit(c, "ativou/desativou", "cupom", code, "")
+  done(c, "Cupom " + code + " alterado.", "/admin/cupons")
+}
+
+fn settings_page(c: *web.Context, errs: map[str]str, status: int) {
+  p := admin_page(c, "admin-settings", "Configurações")
+  p.admin.settings = admin.settings()
+  p.admin.rates = admin.rates()
+  p.admin.staff = admin.staff()
+  p.errors = errs
+  render(c, p, status)
+}
+
+fn a_settings(c: *web.Context) {
+  if !editor_only(c) { return }
+  settings_page(c, map[str]str{}, 200)
+}
+
+fn a_settings_save(c: *web.Context) {
+  if !editor_only(c) { return }
+  f := fields(c)
+  name := strings.trim_space(f["store_name"])
+  errs := map[str]str{}
+  if len(name) < 2 { errs["store_name"] = "Dê um nome à loja." }
+  free := 0
+  if strings.trim_space(f["free_shipping"]) != "" {
+    free = model.parse_reais(f["free_shipping"])
+    if free < 0 { errs["free_shipping"] = "Informe um valor, como 250,00." }
+  }
+  if len(errs) > 0 {
+    settings_page(c, errs, 422)
+    return
+  }
+  db.exec("insert into settings (key, value) values ('store_name', $1), ('free_shipping_cents', $2) on conflict (key) do update set value = excluded.value", []any{name, str(free)})
+  catalog.touch()
+  auth.audit(c, "alterou", "configurações", "", "loja: " + name + "; frete grátis: " + model.money(free))
+  done(c, "Configurações salvas.", "/admin/configuracoes")
+}
+
+fn rate_fields(f: map[str]str) -> (str, int, int, int, int) {
+  lo := catalog.atoi_or(model.digits(f["cep_from"]), -1)
+  hi := catalog.atoi_or(model.digits(f["cep_to"]), -1)
+  price := model.parse_reais(f["price"])
+  if strings.trim_space(f["price"]) == "0" || strings.trim_space(f["price"]) == "0,00" { price = 0 }
+  if len(model.digits(f["cep_from"])) != 8 || len(model.digits(f["cep_to"])) != 8 || lo > hi || price < 0 || strings.trim_space(f["name"]) == "" { return "Confira a faixa: nome, CEPs com 8 dígitos (o inicial menor) e preço.", 0, 0, 0, 0 }
+  return "", lo, hi, price, catalog.atoi_or(f["days"], 5)
+}
+
+fn a_rate_save(c: *web.Context) {
+  if !editor_only(c) { return }
+  f := fields(c)
+  problem, lo, hi, price, days := rate_fields(f)
+  if problem != "" {
+    settings_page(c, map[str]str{"form": problem}, 422)
+    return
+  }
+  id := id_param(c)
+  if id == 0 {
+    db.exec("insert into shipping_rates (name, cep_from, cep_to, price_cents, days) values ($1, $2, $3, $4, $5)", []any{strings.trim_space(f["name"]), lo, hi, price, days})
+  } else {
+    db.exec("update shipping_rates set name = $2, cep_from = $3, cep_to = $4, price_cents = $5, days = $6 where id = $1", []any{id, strings.trim_space(f["name"]), lo, hi, price, days})
+  }
+  auth.audit(c, "salvou", "frete", str(id), strings.trim_space(f["name"]) + ": " + model.money(price))
+  done(c, "Frete salvo.", "/admin/configuracoes")
+}
+
+fn a_rate_delete(c: *web.Context) {
+  if !editor_only(c) { return }
+  db.exec("delete from shipping_rates where id = $1", []any{id_param(c)})
+  auth.audit(c, "removeu", "frete", str(id_param(c)), "")
+  done(c, "Faixa de frete removida.", "/admin/configuracoes")
+}
+
+fn a_staff_add(c: *web.Context) {
+  if !editor_only(c) { return }
+  f := fields(c)
+  role := f["role"]
+  if role != "admin" { role = "operator" }
+  r := db.row("update customers set role = $2 where email = $1 returning id", []any{strings.to_lower(strings.trim_space(f["email"])), role})
+  if r == nil {
+    settings_page(c, map[str]str{"email": "Nenhum cliente com este e-mail. A pessoa precisa criar a conta antes."}, 422)
+    return
+  }
+  auth.audit(c, "deu acesso", "equipe", str(r.get_int("id")), f["email"] + " como " + model.role_label(role))
+  done(c, "Acesso concedido.", "/admin/configuracoes")
+}
+
+fn a_staff_role(c: *web.Context) {
+  if !editor_only(c) { return }
+  id := id_param(c)
+  role := fields(c)["role"]
+  if role != "admin" && role != "operator" { role = "customer" }
+  if id == actor(c) && role != "admin" {
+    fail(c, "Você não pode tirar o seu próprio acesso de administrador.", "/admin/configuracoes")
+    return
+  }
+  db.exec("update customers set role = $2 where id = $1", []any{id, role})
+  db.exec("delete from sessions where customer_id = $1", []any{id})
+  auth.audit(c, "mudou papel", "equipe", str(id), model.role_label(role))
+  done(c, "Papel alterado.", "/admin/configuracoes")
+}
+
+fn a_audit(c: *web.Context) {
+  if !editor_only(c) { return }
+  p := admin_page(c, "admin-audit", "Auditoria")
+  l := listing(c)
+  p.admin.audit = admin.audit(&l)
+  p.admin.listing = l
+  render(c, p, 200)
+}
+
+# ---------------------------------------------------------------- files
+
+fn dist() -> str {
+  d := os.getenv("UI_DIST")
+  if d == "" { return "dist" }
+  return d
+}
+
+fn content_type(p: str) -> str {
+  switch filepath.ext(p) {
+  case ".js", ".mjs": return "text/javascript; charset=utf-8"
+  case ".css": return "text/css; charset=utf-8"
+  case ".wasm": return "application/wasm"
+  case ".json": return "application/json"
+  case ".svg": return "image/svg+xml"
+  case ".html": return "text/html; charset=utf-8"
+  }
+  return "application/octet-stream"
+}
+
+let files_body = map[str]str{}
+let files_gz = map[str]str{}
+let files_tag = map[str]str{}
+
+fn static_file(c: *web.Context) {
+  clean := filepath.clean("/" + c.path())
+  if c.method() == "GET" && clean != "/" && !strings.contains(clean, "..") {
+    f := filepath.join(dist(), clean[1:])
+    body, cached := files_body[f]
+    if !cached && fs.is_file(f) {
+      body, _ = fs.read_file(f)
+      files_body[f] = body
+      e := filepath.ext(f)
+      if e == ".js" || e == ".mjs" || e == ".css" || e == ".wasm" || e == ".svg" { files_gz[f] = gzip.compress(body) }
+      files_tag[f] = "\"" + str(hash.crc32(body) & 0xFFFFFFFF) + "-" + str(len(body)) + "\""
+      cached = true
+    }
+    if cached {
+      if c.query("v") != "" {
+        c.set_header("Cache-Control", "public, max-age=31536000, immutable")
+      } else {
+        c.set_header("Cache-Control", "no-cache")
+      }
+      c.set_header("Vary", "Accept-Encoding")
+      # the same file again (the worker and the wasm have no version in their URL): 304
+      c.set_header("ETag", files_tag[f])
+      if c.header("if-none-match") == files_tag[f] {
+        c.data(304, content_type(f), "")
+        return
+      }
+      gz, has := files_gz[f]
+      if has && gzip.accepted(c.header("accept-encoding")) {
+        c.set_header("Content-Encoding", "gzip")
+        c.data(200, content_type(f), gz)
+        return
+      }
+      c.data(200, content_type(f), body)
+      return
+    }
+  }
+  not_found(c)
+}
+
+# /img/p/<id>-<hue>.svg: the picture of a product (its department's figure in its hue)
+let kinds = map[int]str{}
+
+fn product_image(c: *web.Context) {
+  name := strings.trim_suffix(c.param("file"), ".svg")
+  parts := strings.split(name, "-")
+  if len(parts) != 2 {
+    c.string(404, "")
+    return
+  }
+  id := catalog.atoi_or(parts[0], 0)
+  hue := catalog.atoi_or(parts[1], 20)
+  kind, ok := kinds[id]
+  if !ok {
+    r := db.row("select coalesce(top.slug, c.slug) as top from products p join categories c on c.id = p.category_id left join categories top on top.id = c.parent_id where p.id = $1", []any{id})
+    kind = ""
+    if r != nil { kind = r.get_str("top") }
+    kinds[id] = kind
+  }
+  c.set_header("Cache-Control", "public, max-age=31536000, immutable")
+  send(c, 200, "image/svg+xml", images.product_svg(kind, hue))
+}
+
+# ---------------------------------------------------------------- the routes
+
+fn routes() -> *web.Engine {
+  r := web.new()
+  r.use(web.recovery())
+  if os.getenv("UI_DEV") == "" && os.getenv("QUIET") == "" { r.use(web.logger()) }
+  # the page runs the program in a worker with SharedArrayBuffer: every response is cross-origin isolated
+  r.use(fn(c: *web.Context) {
+    ssr.isolate(c.response)
+    c.next()
+  })
+  r.use(same_origin)
+  r.redirect_trailing_slash = false
+
+  r.get("/", public(home_page))
+  r.get("/busca", public(search_page))
+  r.get("/categoria/:slug", public(category_page))
+  r.get("/produto/:slug", public(product_page))
+  r.get("/img/p/:file", product_image)
+  r.get("/carrinho", cart_page)
+  r.post("/carrinho", cart_add)
+  r.post("/carrinho/:id", cart_set)
+  r.get("/finalizar", checkout_page)
+  r.post("/finalizar", checkout_post)
+  r.get("/pedidos/:id", order_page)
+  r.post("/pedidos/:id/pagar", order_action("paid"))
+  r.post("/pedidos/:id/cancelar", order_action("canceled"))
+  r.get("/entrar", login_page)
+  r.post("/entrar", login_post)
+  r.get("/cadastro", signup_page)
+  r.post("/cadastro", signup_post)
+  r.post("/sair", logout)
+  r.get("/conta", account_page)
+  r.post("/conta", account_post)
+  r.get("/conta/pedidos", my_orders)
+  r.post("/conta/enderecos", address_post)
+  r.post("/conta/enderecos/:id/remover", address_delete)
+
+  r.post("/api/carrinho", api_cart_add)
+  r.post("/api/carrinho/:id", api_cart_set)
+  r.get("/api/sugestoes", api_suggest)
+  r.get("/api/cotacao", api_quote)
+
+  a := r.group("/admin")
+  a.use(staff_only)
+  a.get("", a_dashboard)
+  a.get("/produtos", a_products)
+  a.get("/produtos/novo", a_product_new)
+  a.post("/produtos/novo", a_product_create)
+  a.post("/produtos/lote", a_products_bulk)
+  a.get("/produtos/:id", a_product)
+  a.post("/produtos/:id", a_product_update)
+  a.post("/produtos/:id/estoque", a_product_stock)
+  a.get("/categorias", a_categories)
+  a.post("/categorias", a_category_save)
+  a.post("/categorias/:id", a_category_save)
+  a.post("/categorias/:id/remover", a_category_delete)
+  a.get("/secoes", a_sections)
+  a.post("/secoes", a_section_save)
+  a.get("/secoes/:id", a_section)
+  a.post("/secoes/:id", a_section_save)
+  a.post("/secoes/:id/produtos", a_section_products)
+  a.post("/secoes/:id/remover", a_section_delete)
+  a.get("/pedidos", a_orders)
+  a.get("/pedidos/:id", a_order)
+  a.post("/pedidos/:id/situacao", a_order_status)
+  a.get("/clientes", a_customers)
+  a.get("/clientes/:id", a_customer)
+  a.post("/clientes/:id/bloquear", a_customer_block)
+  a.get("/cupons", a_coupons)
+  a.post("/cupons", a_coupon_create)
+  a.post("/cupons/:code/alternar", a_coupon_toggle)
+  a.get("/configuracoes", a_settings)
+  a.post("/configuracoes", a_settings_save)
+  a.post("/fretes", a_rate_save)
+  a.post("/fretes/:id", a_rate_save)
+  a.post("/fretes/:id/remover", a_rate_delete)
+  a.post("/equipe", a_staff_add)
+  a.post("/equipe/:id", a_staff_role)
+  a.get("/auditoria", a_audit)
+
+  r.no_route(static_file)
+  return r
+}
+
+# ---------------------------------------------------------------- the command line
+
+cmd := ""
+if len(os.args()) > 1 { cmd = os.args()[1] }
+switch cmd {
+case "migrate":
+  applied := db.migrate("sql")
+  print("migrations applied: " + str(len(applied)) + " " + strings.join(applied, " "))
+case "seed":
+  seed.run()
+case "reset":
+  seed.reset()
+  print("database emptied (./server migrate && ./server seed)")
+default:
+  port := os.getenv("PORT")
+  if port == "" { port = "3800" }
+  host := os.getenv("HOST")
+  if host == "" { host = "127.0.0.1" }
+  workers := catalog.atoi_or(os.getenv("WORKERS"), 1)
+  err := routes().run_workers(host + ":" + port, workers)
+  if err != nil {
+    os.eprintln(err.Error())
+    os.exit(1)
+  }
+}

@@ -1,0 +1,35 @@
+# The products' pictures, drawn as SVG: a background in the product's hue and the figure of its
+# department (a jar, a bottle, a sack, a cheese, a pot), so a product without a photo still has a
+# face. /img/p/<id>-<hue>.svg; the URL changes with the hue, so it is cached for good.
+import "std/strings"
+
+fn hsl(h: int, s: int, l: int) -> str { return "hsl(" + str(h) + " " + str(s) + "% " + str(l) + "%)" }
+
+# the figure of a department, drawn in a 200x200 box
+fn figure(kind: str, h: int) -> str {
+  dark := hsl(h, 45, 28)
+  mid := hsl(h, 55, 45)
+  light := hsl((h + 30) % 360, 70, 88)
+  switch kind {
+  case "bebidas":
+    return "<path d='M88 30h24v28c0 6 18 14 18 34v70a10 10 0 0 1-10 10H80a10 10 0 0 1-10-10V92c0-20 18-28 18-34z' fill='" + mid + "'/><rect x='86' y='22' width='28' height='12' rx='3' fill='" + dark + "'/><rect x='76' y='104' width='48' height='40' rx='4' fill='" + light + "'/><path d='M84 124h32' stroke='" + dark + "' stroke-width='4' stroke-linecap='round'/>"
+  case "mercearia":
+    return "<path d='M62 70c0-10 10-16 14-20l-6-12h60l-6 12c4 4 14 10 14 20l8 86a12 12 0 0 1-12 13H66a12 12 0 0 1-12-13z' fill='" + mid + "'/><path d='M76 50h48' stroke='" + dark + "' stroke-width='6' stroke-linecap='round'/><ellipse cx='100' cy='120' rx='26' ry='20' fill='" + light + "'/><path d='M88 120h24' stroke='" + dark + "' stroke-width='4' stroke-linecap='round'/>"
+  case "queijos":
+    return "<path d='M40 120l90-62 30 44v54a6 6 0 0 1-6 6H46a6 6 0 0 1-6-6z' fill='" + light + "'/><path d='M40 120l90-62 30 44z' fill='" + mid + "'/><circle cx='78' cy='140' r='9' fill='" + mid + "' opacity='.55'/><circle cx='118' cy='150' r='6' fill='" + mid + "' opacity='.55'/><circle cx='140' cy='130' r='8' fill='" + mid + "' opacity='.55'/>"
+  case "artesanato":
+    return "<path d='M78 40h44v10c0 6-8 10-8 16 22 8 34 30 34 54 0 30-22 50-48 50s-48-20-48-50c0-24 12-46 34-54 0-6-8-10-8-16z' fill='" + mid + "'/><path d='M58 110c28 10 56 10 84 0' stroke='" + light + "' stroke-width='6' fill='none' stroke-linecap='round'/><path d='M62 132c25 9 51 9 76 0' stroke='" + dark + "' stroke-width='4' fill='none' stroke-linecap='round' stroke-dasharray='2 8'/>"
+  }
+  # doces (and the rest): a jar
+  return "<rect x='56' y='62' width='88' height='108' rx='18' fill='" + mid + "'/><rect x='60' y='42' width='80' height='22' rx='6' fill='" + dark + "'/><rect x='70' y='96' width='60' height='44' rx='6' fill='" + light + "'/><path d='M82 118h36' stroke='" + dark + "' stroke-width='4' stroke-linecap='round'/>"
+}
+
+export fn product_svg(kind: str, hue: int) -> str {
+  h := hue % 360
+  b := strings.Builder{}
+  b.write("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='" + hsl(h, 70, 92) + "'/><stop offset='1' stop-color='" + hsl((h + 25) % 360, 60, 80) + "'/></linearGradient></defs>")
+  b.write("<rect width='200' height='200' fill='url(#g)'/><circle cx='160' cy='40' r='60' fill='" + hsl(h, 80, 96) + "' opacity='.6'/>")
+  b.write(figure(kind, h))
+  b.write("</svg>")
+  return b.string()
+}

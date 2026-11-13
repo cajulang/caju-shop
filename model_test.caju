@@ -1,0 +1,78 @@
+# The formatting and URLs the server and the browser share.
+import { describe, it, expect } from "std/testing"
+import "./model"
+
+describe("money", fn() {
+  it("formats reais with thousands and cents", fn() {
+    expect(model.money(0)).to_equal("R$ 0,00")
+    expect(model.money(5)).to_equal("R$ 0,05")
+    expect(model.money(1990)).to_equal("R$ 19,90")
+    expect(model.money(123456789)).to_equal("R$ 1.234.567,89")
+    expect(model.money(-250)).to_equal("-R$ 2,50")
+  })
+  it("reads prices as people type them", fn() {
+    expect(model.parse_reais("12,90")).to_equal(1290)
+    expect(model.parse_reais("12.90")).to_equal(1290)
+    expect(model.parse_reais("R$ 1.234,5")).to_equal(123450)
+    expect(model.parse_reais("1.234")).to_equal(123400)
+    expect(model.parse_reais("7")).to_equal(700)
+    expect(model.parse_reais("")).to_equal(-1)
+    expect(model.parse_reais("doze")).to_equal(-1)
+    expect(model.parse_reais("1,999")).to_equal(-1)
+  })
+  it("writes cents back for a form", fn() {
+    expect(model.reais(1290)).to_equal("12,90")
+    expect(model.reais(705)).to_equal("7,05")
+    expect(model.reais(0)).to_equal("")
+  })
+})
+
+describe("products", fn() {
+  it("sell for the sale price only when it is lower", fn() {
+    p := model.Product{price: 1000, sale: 800}
+    expect(model.current(p)).to_equal(800)
+    expect(model.on_sale(p)).to_be_true()
+    expect(model.off(p)).to_equal(20)
+    q := model.Product{price: 1000, sale: 0}
+    expect(model.current(q)).to_equal(1000)
+    expect(model.off(q)).to_equal(0)
+  })
+})
+
+describe("the search's URL", fn() {
+  it("keeps the filters and changes one, back to page 1", fn() {
+    s := &model.Search{q: "doce de leite", min: "10", sale: true, sort: "relevance", page: 3, base: "/busca"}
+    expect(model.search_url(s, "", "")).to_equal("/busca?q=doce+de+leite&min=10&promo=1&page=3")
+    expect(model.search_url(s, "sort", "price-asc")).to_equal("/busca?q=doce+de+leite&min=10&promo=1&sort=price-asc")
+    expect(model.search_url(s, "page", "4")).to_equal("/busca?q=doce+de+leite&min=10&promo=1&page=4")
+    expect(model.search_url(s, "promo", "")).to_equal("/busca?q=doce+de+leite&min=10")
+  })
+  it("in a category, another category is another page", fn() {
+    s := &model.Search{category: "doces", base: "/categoria/doces", sort: "relevance", page: 1}
+    expect(model.search_url(s, "estoque", "1")).to_equal("/categoria/doces?estoque=1")
+    expect(model.search_url(s, "categoria", "cocadas")).to_equal("/categoria/cocadas")
+  })
+  it("escapes what it puts in the query", fn() {
+    expect(model.esc("café & cia")).to_equal("caf%C3%A9+%26+cia")
+  })
+})
+
+describe("small helpers", fn() {
+  it("format a CEP", fn() {
+    expect(model.cep("50030230")).to_equal("50030-230")
+    expect(model.cep("50.030-230")).to_equal("50030-230")
+    expect(model.cep("123")).to_equal("123")
+  })
+  it("name statuses and roles", fn() {
+    expect(model.status_label("shipped")).to_equal("Enviado")
+    expect(model.role_label("operator")).to_equal("Operador")
+    expect(model.plural(1, "item", "itens")).to_equal("1 item")
+    expect(model.plural(3, "item", "itens")).to_equal("3 itens")
+  })
+  it("know who may edit the catalog", fn() {
+    expect(model.can_edit(&model.User{role: "admin"})).to_be_true()
+    expect(model.can_edit(&model.User{role: "operator"})).to_be_false()
+    expect(model.is_staff(&model.User{role: "operator"})).to_be_true()
+    expect(model.is_staff(nil)).to_be_false()
+  })
+})

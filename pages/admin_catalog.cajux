@@ -1,0 +1,685 @@
+# The panel: the dashboard, the products (list, bulk actions, form, stock), the categories and the
+# home's sections.
+import ui "../caju-ui/ui"
+import style "../caju-style/style"
+import "std/json"
+import "std/strings"
+import "std/strconv"
+import "./model"
+import "./kit"
+
+let SHEET = style.sheet("admin")
+
+# ---------------------------------------------------------------- pieces of the panel
+
+let toolbar = style.def("admin-toolbar", "mb-4 flex flex-wrap items-end gap-3 [&_select]:h-10 [&_select]:rounded-lg [&_select]:border [&_select]:border-input [&_select]:bg-card [&_select]:px-2.5 [&_select]:text-sm")
+let toolbar_search = style.def("admin-toolbar-search", "h-10 w-full rounded-lg border border-input bg-card px-3 text-sm sm:w-72")
+let toolbar_end = style.def("admin-toolbar-end", "ml-auto flex gap-2")
+let stat_grid = style.def("admin-stats", "grid gap-3 sm:grid-cols-2 xl:grid-cols-5")
+let stat_card = style.def("admin-stat", "@card flex flex-col gap-1 p-4 hover:border-primary/40")
+let stat_value = style.def("admin-stat-value", "text-xl font-bold whitespace-nowrap tabular-nums 2xl:text-2xl")
+let stat_label = style.def("admin-stat-label", "text-xs font-semibold tracking-wide text-muted-foreground uppercase")
+let dash_grid = style.def("admin-dash-grid", "mt-6 grid gap-6 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]")
+let panel = style.def("admin-panel", "@card flex flex-col gap-4")
+let panel_head = style.def("admin-panel-head", "flex items-center justify-between gap-3")
+let panel_title = style.def("admin-panel-title", "text-lg font-bold")
+let chart = style.def("admin-chart", "h-56 w-full")
+let bar_list = style.def("admin-bars", "flex flex-col gap-2.5")
+let bar_row = style.def("admin-bar-row", "grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 text-sm")
+let bar_track = style.def("admin-bar-track", "col-span-2 h-2 overflow-hidden rounded-full bg-muted")
+let bar_fill = style.def("admin-bar-fill", "h-full rounded-full bg-primary")
+let thumb = style.def("admin-thumb", "size-10 rounded-md border bg-muted")
+let name_cell = style.def("admin-name-cell", "flex items-center gap-3 [&_a]:font-semibold [&_a:hover]:text-primary")
+let form_layout = style.def("admin-form-layout", "grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px] xl:items-start")
+let preview = style.def("admin-preview", "aspect-square w-full rounded-xl border bg-muted")
+let hue_row = style.def("admin-hue", "flex items-center gap-3 [&_input]:flex-1 [&_input]:accent-primary")
+let move_row = style.def("admin-move", "grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 text-sm")
+let delta_in = style.def("admin-delta-in", "font-semibold text-ok tabular-nums")
+let delta_out = style.def("admin-delta-out", "font-semibold text-danger tabular-nums")
+let bulk_bar = style.def("admin-bulk", "mb-3 flex flex-wrap items-center gap-2 rounded-xl border bg-card px-3 py-2 text-sm [&_select]:h-8 [&_select]:rounded-md [&_select]:border [&_select]:border-input [&_select]:bg-card [&_select]:px-2")
+let cat_child = style.def("admin-cat-child", "pl-8 before:mr-2 before:text-muted-foreground before:content-['└']")
+let inline_form = style.def("admin-inline-form", "flex flex-wrap items-center gap-2 [&_input]:h-8 [&_input]:rounded-md [&_input]:border [&_input]:border-input [&_input]:bg-card [&_input]:px-2 [&_input]:text-sm [&_select]:h-8 [&_select]:rounded-md [&_select]:border [&_select]:border-input [&_select]:bg-card [&_select]:px-2 [&_select]:text-sm")
+let order_list = style.def("admin-order-list", "flex flex-col rounded-xl [&>*:not(:last-child)]:border-b border bg-card")
+let order_item = style.def("admin-order-item", "flex items-center gap-3 px-3 py-2 text-sm")
+let pick_results = style.def("admin-pick-results", "flex max-h-72 flex-col overflow-y-auto [&>*:not(:last-child)]:border-b rounded-xl border bg-card")
+
+export struct ListingBarProps {
+  base: str
+  listing: model.Listing
+  placeholder: str
+  filters: []str          # value, label... for "f"
+  filters2: []str         # for "f2" ([] none)
+  sorts: []str            # for "sort"
+  actions: []*ui.Node
+}
+
+# the search and the filters of a list (a GET form); with the program the selects apply at once
+export fn ListingBar(p: ListingBarProps) -> *ui.Node {
+  l := p.listing
+  sel := fn(name: str, key: str, value: str, opts: []str) -> *ui.Node {
+    items := []*ui.Node{}
+    for i := 0; i + 1 < len(opts); i += 2 { items = append(items, <option value={opts[i]} selected={opts[i] == value}>{opts[i + 1]}</option>) }
+    return <select name={name} aria-label={name} onChange={fn(e: *ui.Event) { kit.visit(model.listing_url(l, p.base, key, e.value)) }}>{items}</select>
+  }
+  return (
+    <form class={toolbar} method="get" action={p.base}>
+      <input class={toolbar_search} type="search" name="q" value={l.q} placeholder={p.placeholder} aria-label="Buscar" />
+      {ui.when(len(p.filters) > 0, sel("f", "f", l.filter, p.filters))}
+      {ui.when(len(p.filters2) > 0, sel("f2", "f2", l.filter2, p.filters2))}
+      {ui.when(len(p.sorts) > 0, sel("sort", "sort", l.sort, p.sorts))}
+      <button class={kit.button_ghost} type="submit">Filtrar</button>
+      <div class={toolbar_end}>{p.actions}</div>
+    </form>
+  )
+}
+
+fn listing_count(l: model.Listing, one: str, many: str) -> *ui.Node {
+  return <p class={kit.muted_text} style="margin-bottom:.75rem">{model.plural(l.total, one, many)} · página {l.page} de {l.pages}</p>
+}
+
+export fn pages_of(l: model.Listing, base: str) -> *ui.Node {
+  return kit.pagination(l.page, l.pages, fn(n: int) -> str { return model.listing_url(l, base, "page", str(n)) })
+}
+
+# ---------------------------------------------------------------- the dashboard
+
+struct SalesChartProps {
+  days: []model.DayTotal
+}
+
+# sales of the last 30 days, as bars; hovering a bar shows its day
+fn SalesChart(p: SalesChartProps) -> *ui.Node {
+  hover := ui.use_int(-1)
+  most := 1
+  for _, d := range p.days {
+    if d.total > most { most = d.total }
+  }
+  w := 600
+  h := 200
+  n := len(p.days)
+  if n == 0 { return ui.empty() }
+  slot := w / n
+  bars := []*ui.Node{}
+  for i, d := range p.days {
+    bh := d.total * (h - 24) / most
+    if bh < 2 && d.total > 0 { bh = 2 }
+    idx := i
+    fill := "var(--primary)"
+    if hover.v == i { fill = "var(--accent)" }
+    bars = append(bars, (
+      <rect key={i} x={i * slot + 2} y={h - 18 - bh} width={slot - 4} height={bh} rx="3" fill={fill}
+        onMouseEnter={fn() { hover.set(idx) }} onMouseLeave={fn() { hover.set(-1) }}>
+        <title>{d.day}: {model.money(d.total)} ({model.plural(d.orders, "pedido", "pedidos")})</title>
+      </rect>
+    ))
+    if i % 5 == 0 || i == n - 1 {
+      anchor := "middle"
+      if i == 0 { anchor = "start" }
+      if i == n - 1 { anchor = "end" }
+      tx := i * slot + slot / 2
+      if i == 0 { tx = 2 }
+      if i == n - 1 { tx = w - 2 }
+      bars = append(bars, <text key={"t" + str(i)} x={tx} y={h - 4} font-size="10" text-anchor={anchor} fill="var(--muted-foreground)">{d.day}</text>)
+    }
+  }
+  label := "Passe o mouse sobre um dia"
+  if hover.v >= 0 && hover.v < n {
+    d := p.days[hover.v]
+    label = d.day + ": " + model.money(d.total) + " em " + model.plural(d.orders, "pedido", "pedidos")
+  }
+  total := 0
+  for _, d := range p.days { total += d.total }
+  return (
+    <div class={kit.stack}>
+      <div class={panel_head}>
+        <h2 class={panel_title}>Vendas dos últimos 30 dias</h2>
+        <strong>{model.money(total)}</strong>
+      </div>
+      <svg class={chart} viewBox={"0 0 " + str(w) + " " + str(h)} preserveAspectRatio="none" role="img" aria-label="Vendas por dia">{bars}</svg>
+      <span class={kit.muted_text} data-chart-label="">{label}</span>
+    </div>
+  )
+}
+
+export struct AdminProps {
+  page: model.Page
+}
+
+export struct DashboardProps {
+  page: model.Page
+}
+
+export fn Dashboard(p: DashboardProps) -> *ui.Node {
+  d := p.page.admin.dashboard
+  stats := []*ui.Node{}
+  for _, s := range d.stats {
+    stats = append(stats, (
+      <a class={stat_card} href={s.href}>
+        <span class={stat_label}>{s.label}</span>
+        <span class={stat_value}>{s.value}</span>
+        <span class={kit.muted_text}>{s.note}</span>
+      </a>
+    ))
+  }
+  most := 1
+  for _, t := range d.top {
+    if t.qty > most { most = t.qty }
+  }
+  top := []*ui.Node{}
+  for _, t := range d.top {
+    top = append(top, (
+      <div key={t.id} class={bar_row}>
+        <a class={kit.link} href={"/admin/produtos/" + str(t.id)}>{t.name}</a>
+        <span class={kit.muted_text}>{t.qty} un. · {model.money(t.total)}</span>
+        <div class={bar_track}><div class={bar_fill} style={"width:" + str(t.qty * 100 / most) + "%"}></div></div>
+      </div>
+    ))
+  }
+  status := []*ui.Node{}
+  for _, st := range d.by_status {
+    status = append(status, <a key={st.slug} class={kit.row} href={"/admin/pedidos?f=" + st.slug}>{kit.status_badge(st.slug)}<strong>{st.count}</strong></a>)
+  }
+  low := []*ui.Node{}
+  for _, pr := range d.low_stock {
+    low = append(low, <tr key={pr.id}><td><a class={kit.link} href={"/admin/produtos/" + str(pr.id)}>{pr.name}</a></td><td class={kit.num_cell}>{pr.stock}</td></tr>)
+  }
+  recent := []*ui.Node{}
+  for _, o := range d.recent {
+    recent = append(recent, <tr key={o.id}><td><a class={kit.link} href={"/admin/pedidos/" + str(o.id)}>#{o.id}</a></td><td>{o.customer}</td><td>{kit.status_badge(o.status)}</td><td class={kit.num_cell}>{model.money(o.total)}</td></tr>)
+  }
+  return (
+    <div>
+      <div class={stat_grid}>{stats}</div>
+      <div class={dash_grid}>
+        <section class={panel}><SalesChart days={d.days} /></section>
+        <section class={panel}>
+          <h2 class={panel_title}>Mais vendidos (30 dias)</h2>
+          <div class={bar_list}>{top}</div>
+        </section>
+        <section class={panel}>
+          <div class={panel_head}><h2 class={panel_title}>Últimos pedidos</h2><a class={kit.link} href="/admin/pedidos">Ver todos</a></div>
+          <div class={kit.table_wrap}><table class={kit.table}><tbody>{recent}</tbody></table></div>
+        </section>
+        <div class={kit.stack}>
+          <section class={panel}>
+            <h2 class={panel_title}>Pedidos por situação</h2>
+            <div class={kit.row}>{status}</div>
+          </section>
+          <section class={panel}>
+            <div class={panel_head}><h2 class={panel_title}>Estoque baixo</h2><a class={kit.link} href="/admin/produtos?f=low">Ver todos</a></div>
+            <div class={kit.table_wrap}><table class={kit.table}><tbody>{low}</tbody></table></div>
+          </section>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+# ---------------------------------------------------------------- products
+
+fn category_options(cats: []model.Category, first: str) -> []str {
+  out := []str{"", first}
+  for _, c := range cats {
+    label := c.name
+    if c.depth > 0 { label = "— " + c.name }
+    out = append(out, str(c.id))
+    out = append(out, label)
+  }
+  return out
+}
+
+export struct ProductsProps {
+  page: model.Page
+}
+
+export fn Products(p: ProductsProps) -> *ui.Node {
+  a := p.page.admin
+  l := a.listing
+  editor := model.can_edit(p.page.user)
+  picked := ui.use_state(map[int]bool{})
+  sel := picked.v.(map[int]bool)
+  count := 0
+  for _, on := range sel {
+    if on { count++ }
+  }
+  rows := []*ui.Node{}
+  for _, pr := range a.products {
+    id := pr.id
+    state := <span class={kit.badge_ok}>Ativo</span>
+    if !pr.active { state = <span class={kit.badge}>Inativo</span> }
+    stock_cls := ""
+    if pr.stock <= 5 { stock_cls = delta_out }
+    rows = append(rows, (
+      <tr key={id}>
+        {ui.when(editor, <td><input type="checkbox" name="ids" value={str(id)} form="bulk" checked={sel[id]} aria-label={"Selecionar " + pr.name} onChange={fn(e: *ui.Event) {
+          next := map[int]bool{}
+          for k, v := range sel { next[k] = v }
+          next[id] = e.checked
+          picked.set(next)
+        }} /></td>)}
+        <td><div class={name_cell}><img class={thumb} src={kit.image_url(pr.id, pr.hue)} alt="" loading="lazy" /><span><a href={"/admin/produtos/" + str(id)}>{pr.name}</a><br /><span class={kit.muted_text}>#{id} · {pr.category}</span></span></div></td>
+        <td class={kit.num_cell}>{kit.price(pr)}</td>
+        <td class={kit.num_cell}><span class={stock_cls}>{pr.stock}</span></td>
+        <td>{state}</td>
+      </tr>
+    ))
+  }
+  actions := []*ui.Node{}
+  if editor { actions = append(actions, <a class={kit.button_primary} href="/admin/produtos/novo">{kit.icon_plus(16)}Novo produto</a>) }
+  bulk := ui.empty()
+  if editor {
+    bulk = (
+      <form id="bulk" class={bulk_bar} method="post" action="/admin/produtos/lote">
+        <strong data-selected={count}>{model.plural(count, "selecionado", "selecionados")}</strong>
+        <button class={kit.button_small} type="submit" name="action" value="activate">Ativar</button>
+        <button class={kit.button_small} type="submit" name="action" value="deactivate">Desativar</button>
+        <span class={kit.muted_text}>ou mover para</span>
+        <select name="category_id" aria-label="Categoria">{options_of(category_options(a.categories, "categoria…"), "")}</select>
+        <button class={kit.button_small} type="submit" name="action" value="move">Mover</button>
+      </form>
+    )
+  }
+  head_check := ui.empty()
+  if editor {
+    head_check = <th><input type="checkbox" aria-label="Selecionar todos" checked={count > 0 && count == len(a.products)} onChange={fn(e: *ui.Event) {
+      next := map[int]bool{}
+      for _, pr := range a.products { next[pr.id] = e.checked }
+      picked.set(next)
+    }} /></th>
+  }
+  return (
+    <div>
+      <ListingBar base="/admin/produtos" listing={l} placeholder="Nome, endereço ou código"
+        filters={[]str{"", "Todos", "active", "Ativos", "inactive", "Inativos", "low", "Estoque baixo", "out", "Esgotados", "sale", "Em promoção"}}
+        filters2={category_options(a.categories, "Todas as categorias")}
+        sorts={[]str{"", "Mais novos", "name", "Nome", "price", "Preço", "stock", "Estoque", "updated", "Alterados"}}
+        actions={actions} />
+      {bulk}
+      {listing_count(l, "produto", "produtos")}
+      <div class={kit.table_wrap}>
+        <table class={kit.table}>
+          <thead><tr>{head_check}<th>Produto</th><th class={kit.num_cell}>Preço</th><th class={kit.num_cell}>Estoque</th><th>Situação</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+      {pages_of(l, "/admin/produtos")}
+    </div>
+  )
+}
+
+fn options_of(opts: []str, value: str) -> []*ui.Node {
+  out := []*ui.Node{}
+  for i := 0; i + 1 < len(opts); i += 2 { out = append(out, <option value={opts[i]} selected={opts[i] == value}>{opts[i + 1]}</option>) }
+  return out
+}
+
+export struct ProductFormProps {
+  page: model.Page
+}
+
+export fn ProductForm(p: ProductFormProps) -> *ui.Node {
+  a := p.page.admin
+  pr := a.product
+  creating := pr.id == 0
+  editor := model.can_edit(p.page.user)
+  f := kit.form_of(p.page)
+  e := kit.errors_of(p.page)
+  val := fn(k: str, def: str) -> str {
+    v, ok := f[k]
+    if ok { return v }
+    return def
+  }
+  hue := ui.use_int(catalog_hue(val("hue", str(pr.hue))))
+  name := ui.use_str(val("name", pr.name))
+  active := pr.active
+  if len(f) > 0 { active = f["active"] != "" }
+  in_section := map[int]bool{}
+  for _, id := range a.sections_of { in_section[id] = true }
+  secs := []*ui.Node{}
+  for _, s := range a.sections {
+    secs = append(secs, <label key={s.id} class={kit.check_box}><input type="checkbox" name="sections" value={str(s.id)} checked={in_section[s.id]} />{s.title}</label>)
+  }
+  action := "/admin/produtos/" + str(pr.id)
+  if creating { action = "/admin/produtos/novo" }
+  moves := []*ui.Node{}
+  for i, m := range a.moves {
+    cls := delta_in
+    sign := "+"
+    if m.delta < 0 {
+      cls = delta_out
+      sign = ""
+    }
+    who := m.actor
+    if m.order_id > 0 { who = "pedido #" + str(m.order_id) }
+    moves = append(moves, <div key={i} class={move_row}><span class={cls}>{sign}{m.delta}</span><span>{m.reason} <span class={kit.muted_text}>· {who} · {m.at}</span></span></div>)
+  }
+  stock_field := ui.empty()
+  if creating { stock_field = <kit.Field label="Estoque inicial" name="stock" kind="number" value={val("stock", "0")} error={e["stock"]} required={true} /> }
+  side := ui.empty()
+  if !creating {
+    side = (
+      <section class={panel}>
+        <h2 class={panel_title}>Estoque: <span data-stock={pr.stock}>{pr.stock}</span></h2>
+        <form class={kit.stack} method="post" action={"/admin/produtos/" + str(pr.id) + "/estoque"}>
+          <div class={kit.form_grid}>
+            <kit.Field label="Quantidade" name="delta" kind="number" value="" error={e["delta"]} hint="Negativa para saída" />
+            <kit.Select label="Motivo" name="reason" value="" options={[]str{"Entrada de mercadoria", "Entrada de mercadoria", "Perda ou avaria", "Perda ou avaria", "Correção de inventário", "Correção de inventário", "Devolução", "Devolução"}} />
+          </div>
+          <button class={kit.button_accent} type="submit">Ajustar estoque</button>
+        </form>
+        <h3 class={stat_label}>Movimentações</h3>
+        <div class={kit.stack} style="gap:.6rem">{moves}</div>
+      </section>
+    )
+  }
+  return (
+    <div class={kit.stack}>
+      <a class={kit.link} href="/admin/produtos">← Produtos</a>
+      {ui.when(e["form"] != "", <div class={kit.alert_error}>{e["form"]}</div>)}
+      <div class={form_layout}>
+        <form class={panel} method="post" action={action}>
+          <fieldset disabled={!editor} style="display:contents">
+            <div class={kit.form_grid}>
+              <div class={kit.span_2}>
+                <div class={kit.stack} style="gap:.4rem">
+                  <label class={kit.field_label} for="f-name">Nome</label>
+                  <input class={field_like} id="f-name" name="name" value={name.v} required={true} onInput={fn(ev: *ui.Event) { name.set(ev.value) }} />
+                  {ui.when(e["name"] != "", <span class={kit.field_error}>{e["name"]}</span>)}
+                </div>
+              </div>
+              <kit.Field label="Endereço (slug)" name="slug" value={val("slug", pr.slug)} error={e["slug"]} hint={"Vazio: gerado do nome (/produto/…)"} />
+              <kit.Select label="Categoria" name="category_id" value={val("category_id", str(pr.category_id))} error={e["category_id"]} options={category_options(a.categories, "Escolha…")} />
+              <kit.Field label="Preço (R$)" name="price" value={val("price", model.reais(pr.price))} error={e["price"]} placeholder="12,90" required={true} />
+              <kit.Field label="Preço promocional (R$)" name="sale" value={val("sale", model.reais(pr.sale))} error={e["sale"]} placeholder="em branco: sem promoção" />
+              {stock_field}
+              <div class={kit.span_2}><kit.Field label="Descrição" name="description" kind="textarea" value={val("description", pr.description)} error={e["description"]} /></div>
+              <div class={kit.span_2}><div class={kit.row}>{kit.checkbox("active", "Ativo (aparece na loja)", active)}</div></div>
+              <div class={kit.span_2}>
+                <div class={kit.stack} style="gap:.4rem">
+                  <span class={stat_label}>Seções da home</span>
+                  <div class={kit.row}>{secs}</div>
+                </div>
+              </div>
+            </div>
+            <input type="hidden" name="hue" value={str(hue.v)} />
+            {ui.when(editor, <div class={kit.row}><button class={kit.button_primary} type="submit">{save_label(creating)}</button>{ui.when(!creating, <a class={kit.button_ghost} href={"/produto/" + pr.slug}>Ver na loja</a>)}</div>)}
+          </fieldset>
+        </form>
+        <div class={kit.stack}>
+          <section class={panel}>
+            <h2 class={panel_title}>Imagem</h2>
+            <img class={preview} src={kit.image_url(pr.id, hue.v)} alt="" data-hue={hue.v} />
+            <strong>{name.v}</strong>
+            <label class={hue_row}>Cor<input type="range" min="0" max="359" value={str(hue.v)} disabled={!editor} onInput={fn(ev: *ui.Event) {
+              n, err := strconv.atoi(ev.value)
+              if err == nil { hue.set(n) }
+            }} /></label>
+          </section>
+          {side}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+let field_like = style.def("admin-field-like", "h-10 w-full rounded-lg border border-input bg-card px-3 text-[15px] focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/15 focus-visible:outline-none")
+
+fn save_label(creating: bool) -> str {
+  if creating { return "Criar produto" }
+  return "Salvar alterações"
+}
+
+fn catalog_hue(s: str) -> int {
+  n, err := strconv.atoi(s)
+  if err != nil { return 20 }
+  return n
+}
+
+# ---------------------------------------------------------------- categories
+
+export struct CategoriesProps {
+  page: model.Page
+}
+
+export fn Categories(p: CategoriesProps) -> *ui.Node {
+  a := p.page.admin
+  editor := model.can_edit(p.page.user)
+  e := kit.errors_of(p.page)
+  f := kit.form_of(p.page)
+  tops := []str{"", "Primeiro nível"}
+  for _, c := range a.categories {
+    if c.depth == 0 {
+      tops = append(tops, str(c.id))
+      tops = append(tops, c.name)
+    }
+  }
+  rows := []*ui.Node{}
+  for _, c := range a.categories {
+    name_cls := ""
+    if c.depth > 0 { name_cls = cat_child }
+    edit := ui.empty()
+    if editor {
+      edit = (
+        <div class={kit.row}>
+          <form class={inline_form} method="post" action={"/admin/categorias/" + str(c.id)}>
+            <input name="name" value={c.name} aria-label="Nome" required={true} />
+            <input name="slug" value={c.slug} aria-label="Endereço" style="width:9rem" />
+            <select name="parent_id" aria-label="Categoria-mãe">{options_of(tops, str(c.parent_id))}</select>
+            <input name="position" type="number" value={str(c.position)} aria-label="Ordem" style="width:4.5rem" />
+            <input type="hidden" name="description" value={c.description} />
+            <button class={kit.button_small} type="submit">Salvar</button>
+          </form>
+          <form method="post" action={"/admin/categorias/" + str(c.id) + "/remover"}><button class={kit.button_small} type="submit" aria-label={"Remover " + c.name}>{kit.icon_trash(14)}</button></form>
+        </div>
+      )
+    }
+    rows = append(rows, (
+      <tr key={c.id}>
+        <td><span class={name_cls}><a class={kit.link} href={"/categoria/" + c.slug}>{c.name}</a></span></td>
+        <td class={kit.num_cell}><a href={"/admin/produtos?f2=" + str(c.id)}>{c.products}</a></td>
+        <td>{edit}</td>
+      </tr>
+    ))
+  }
+  create := ui.empty()
+  if editor {
+    create = (
+      <section class={panel}>
+        <h2 class={panel_title}>Nova categoria</h2>
+        <form class={kit.stack} method="post" action="/admin/categorias">
+          <div class={kit.form_grid}>
+            <kit.Field label="Nome" name="name" value={f["name"]} error={e["name"]} required={true} />
+            <kit.Field label="Endereço (slug)" name="slug" value={f["slug"]} error={e["slug"]} hint="Vazio: gerado do nome" />
+            <kit.Select label="Dentro de" name="parent_id" value={f["parent_id"]} error={e["parent_id"]} options={tops} />
+            <kit.Field label="Ordem" name="position" kind="number" value={f["position"]} />
+            <div class={kit.span_2}><kit.Field label="Descrição" name="description" value={f["description"]} /></div>
+          </div>
+          <div><button class={kit.button_primary} type="submit">Criar categoria</button></div>
+        </form>
+      </section>
+    )
+  }
+  return (
+    <div class={kit.stack}>
+      {ui.when(e["form"] != "", <div class={kit.alert_error} role="alert">{e["form"]}</div>)}
+      <div class={kit.table_wrap}>
+        <table class={kit.table}>
+          <thead><tr><th>Categoria</th><th class={kit.num_cell}>Produtos</th><th>{ui.when(editor, <span>Editar (nome, endereço, mãe, ordem)</span>)}</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+      {create}
+    </div>
+  )
+}
+
+# ---------------------------------------------------------------- the home's sections
+
+export struct SectionsProps {
+  page: model.Page
+}
+
+export fn Sections(p: SectionsProps) -> *ui.Node {
+  a := p.page.admin
+  editor := model.can_edit(p.page.user)
+  e := kit.errors_of(p.page)
+  f := kit.form_of(p.page)
+  rows := []*ui.Node{}
+  for _, s := range a.sections {
+    state := <span class={kit.badge_ok}>Visível</span>
+    if !s.active { state = <span class={kit.badge}>Oculta</span> }
+    rows = append(rows, <tr key={s.id}><td><a class={kit.link} href={"/admin/secoes/" + str(s.id)}>{s.title}</a><br /><span class={kit.muted_text}>{s.subtitle}</span></td><td class={kit.num_cell}>{s.position}</td><td class={kit.num_cell}>{s.count}</td><td>{state}</td></tr>)
+  }
+  create := ui.empty()
+  if editor {
+    create = (
+      <section class={panel}>
+        <h2 class={panel_title}>Nova seção</h2>
+        <form class={kit.stack} method="post" action="/admin/secoes">
+          <div class={kit.form_grid}>
+            <kit.Field label="Título" name="title" value={f["title"]} error={e["title"]} required={true} />
+            <kit.Field label="Ordem" name="position" kind="number" value={f["position"]} />
+            <div class={kit.span_2}><kit.Field label="Subtítulo" name="subtitle" value={f["subtitle"]} /></div>
+          </div>
+          {kit.checkbox("active", "Visível na home", true)}
+          <div><button class={kit.button_primary} type="submit">Criar seção</button></div>
+        </form>
+      </section>
+    )
+  }
+  return (
+    <div class={kit.stack}>
+      <div class={kit.table_wrap}>
+        <table class={kit.table}>
+          <thead><tr><th>Seção</th><th class={kit.num_cell}>Ordem</th><th class={kit.num_cell}>Produtos</th><th>Situação</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+      {create}
+    </div>
+  )
+}
+
+struct Found {
+  id: int
+  name: str
+  hue: int
+}
+
+# a section: its data, and its products in order (up and down, remove, add by searching); the
+# order goes to the server as the hidden field "ids"
+export struct SectionEditorProps {
+  page: model.Page
+}
+
+export fn SectionEditor(p: SectionEditorProps) -> *ui.Node {
+  a := p.page.admin
+  s := a.section
+  editor := model.can_edit(p.page.user)
+  e := kit.errors_of(p.page)
+  start := []Found{}
+  for _, pr := range s.products { start = append(start, Found{id: pr.id, name: pr.name, hue: pr.hue}) }
+  items := ui.use_state(start)
+  found := ui.use_state([]Found{})
+  list := items.v.([]Found)
+  move := fn(i: int, d: int) {
+    j := i + d
+    if j < 0 || j >= len(list) { return }
+    next := []Found{}
+    for _, x := range list { next = append(next, x) }
+    t := next[i]
+    next[i] = next[j]
+    next[j] = t
+    items.set(next)
+  }
+  remove := fn(i: int) {
+    next := []Found{}
+    for k, x := range list {
+      if k != i { next = append(next, x) }
+    }
+    items.set(next)
+  }
+  add := fn(f: Found) {
+    for _, x := range list {
+      if x.id == f.id { return }
+    }
+    next := []Found{}
+    for _, x := range list { next = append(next, x) }
+    items.set(append(next, f))
+  }
+  search := fn(q: str) {
+    if len(strings.trim_space(q)) < 2 {
+      found.set([]Found{})
+      return
+    }
+    kit.api("GET", "/api/sugestoes?q=" + model.esc(q), "", fn(code: int, body: str) {
+      if code != 200 { return }
+      r := []Found{}
+      json.unmarshal(body, &r)
+      found.set(r)
+    })
+  }
+  ids := []str{}
+  rows := []*ui.Node{}
+  for i, x := range list {
+    k := i
+    ids = append(ids, str(x.id))
+    rows = append(rows, (
+      <div key={x.id} class={order_item} data-item={x.id}>
+        <img class={thumb} src={kit.image_url(x.id, x.hue)} alt="" />
+        <span style="flex:1">{x.name}</span>
+        {ui.when(editor, (
+          <span class={kit.row} style="gap:.25rem">
+            <button class={kit.button_small} type="button" aria-label="Subir" disabled={k == 0} onClick={fn() { move(k, -1) }}>{kit.icon_up(14)}</button>
+            <button class={kit.button_small} type="button" aria-label="Descer" disabled={k == len(list) - 1} onClick={fn() { move(k, 1) }}>{kit.icon_down(14)}</button>
+            <button class={kit.button_small} type="button" aria-label="Tirar" onClick={fn() { remove(k) }}>{kit.icon_trash(14)}</button>
+          </span>
+        ))}
+      </div>
+    ))
+  }
+  results := []*ui.Node{}
+  for _, f := range found.v.([]Found) {
+    item := f
+    results = append(results, <button key={f.id} class={order_item} type="button" style="cursor:pointer;text-align:left" onClick={fn() { add(item) }}><img class={thumb} src={kit.image_url(f.id, f.hue)} alt="" /><span style="flex:1">{f.name}</span>{kit.icon_plus(16)}</button>)
+  }
+  active := s.active
+  return (
+    <div class={kit.stack}>
+      <a class={kit.link} href="/admin/secoes">← Seções</a>
+      <div class={form_layout}>
+        <section class={panel}>
+          <h2 class={panel_title}>Produtos, na ordem da home</h2>
+          <div class={order_list}>{rows}</div>
+          {ui.when(len(list) == 0, <p class={kit.muted_text}>Nenhum produto: busque ao lado para adicionar.</p>)}
+          <form method="post" action={"/admin/secoes/" + str(s.id) + "/produtos"}>
+            <input type="hidden" name="ids" value={strings.join(ids, ",")} />
+            {ui.when(editor, <button class={kit.button_primary} type="submit">Salvar ordem e produtos</button>)}
+          </form>
+        </section>
+        <div class={kit.stack}>
+          {ui.when(editor, (
+            <section class={panel}>
+              <h2 class={panel_title}>Adicionar produto</h2>
+              <input class={field_like} type="search" placeholder="Buscar produto…" aria-label="Buscar produto" onInput={fn(ev: *ui.Event) { search(ev.value) }} />
+              <div class={pick_results}>{results}</div>
+            </section>
+          ))}
+          <section class={panel}>
+            <h2 class={panel_title}>Dados da seção</h2>
+            <form class={kit.stack} method="post" action={"/admin/secoes/" + str(s.id)}>
+              <fieldset disabled={!editor} style="display:contents">
+                <kit.Field label="Título" name="title" value={s.title} error={e["title"]} required={true} />
+                <kit.Field label="Subtítulo" name="subtitle" value={s.subtitle} />
+                <kit.Field label="Ordem" name="position" kind="number" value={str(s.position)} />
+                {kit.checkbox("active", "Visível na home", active)}
+                {ui.when(editor, <div class={kit.row}><button class={kit.button_primary} type="submit">Salvar</button></div>)}
+              </fieldset>
+            </form>
+            {ui.when(editor, <form method="post" action={"/admin/secoes/" + str(s.id) + "/remover"}><button class={kit.button_danger} type="submit">Remover seção</button></form>)}
+          </section>
+        </div>
+      </div>
+    </div>
+  )
+}

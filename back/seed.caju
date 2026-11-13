@@ -1,0 +1,374 @@
+# Demonstration data: the departments and their categories, about 200 products of the Northeast,
+# the home's sections, coupons, shipping rates, customers and three months of orders.
+#   ./shop seed       (on an empty database; ./shop reset drops everything first)
+import "std/strings"
+import "std/os"
+import "./back/db"
+import "./back/auth"
+import "./back/catalog"
+
+# department | slug | description, then its categories: "  slug | name | description"
+const CATEGORIES = `Doces|doces|Doces de tacho, de corte e de colher, feitos como nas cozinhas do interior.
+  cocadas|Cocadas|Cocadas de forno, de colher e queimadas.
+  doces-de-corte|Doces de corte|Goiabada, bananada, doce de caju e outros para cortar em fatias.
+  rapaduras|Rapaduras e alfenins|Da batida ao alfenim, direto dos engenhos.
+  compotas|Compotas e geleias|Frutas em calda e geleias de frutas do sertão.
+Bebidas|bebidas|Cachaças de alambique, licores, polpas de fruta e cafés.
+  cachacas|Cachaças|Brancas e envelhecidas, de alambiques do Nordeste.
+  licores|Licores|Licores de frutas, para a sobremesa e o São João.
+  polpas|Polpas e sucos|Polpas de fruta congeladas e sucos integrais.
+  cafes|Cafés|Cafés das serras de Pernambuco, Ceará e Bahia.
+Mercearia|mercearia|Farinhas, temperos, castanhas e grãos para a cozinha nordestina.
+  farinhas|Farinhas e goma|Farinha de mandioca, goma para tapioca e flocão.
+  temperos|Temperos|Colorau, pimentas, coentro e misturas da casa.
+  castanhas|Castanhas e amendoins|Castanha de caju torrada, amendoim e mix.
+  graos|Grãos|Feijão verde, fava, feijão de corda e milho.
+Queijos e laticínios|queijos|Queijo coalho, queijo manteiga e manteiga de garrafa.
+  coalho|Queijo coalho|Para assar na brasa ou na frigideira.
+  queijo-manteiga|Queijo manteiga|O queijo do sertão, cremoso e salgadinho.
+  manteiga-de-garrafa|Manteiga de garrafa|Clarificada, para o feijão, a macaxeira e a carne de sol.
+Artesanato|artesanato|Peças feitas à mão por artesãos do Nordeste.
+  ceramica|Cerâmica e barro|Panelas, potes e bonecos de barro.
+  rendas|Rendas e bordados|Renda renascença, labirinto e bordados.
+  palha|Palha e cestaria|Cestos, bolsas e chapéus de palha de carnaúba e de buriti.
+  cordel|Cordel e xilogravura|Folhetos de cordel e gravuras em madeira.`
+
+# category | name | price (cents) | description | variants ("label:factor;...", "" none)
+const PRODUCTS = `cocadas|Cocada branca|900|Coco fresco ralado e açúcar, cozidos no tacho até dar o ponto.|200 g:1;400 g:1.8;caixa com 12:4.5
+cocadas|Cocada queimada|950|Caramelizada no tacho, com o sabor tostado do açúcar.|200 g:1;400 g:1.8
+cocadas|Cocada de maracujá|1050|Coco com polpa de maracujá do sertão.|200 g:1;400 g:1.8
+cocadas|Cocada de abacaxi|1050|Coco com abacaxi em pedaços.|200 g:1;400 g:1.8
+cocadas|Cocada de forno|1200|Assada até dourar por cima, macia por dentro.|250 g:1;500 g:1.85
+cocadas|Cocada de leite condensado|1150|Cremosa, de colher.|pote 250 g:1;pote 500 g:1.8
+doces-de-corte|Goiabada cascão|1400|Goiaba com casca, apurada por horas no tacho de cobre.|300 g:1;600 g:1.8;1 kg:2.8
+doces-de-corte|Bananada|1100|Banana madura e açúcar, em barra.|300 g:1;600 g:1.8
+doces-de-corte|Doce de caju em barra|1500|O caju inteiro, cozido até virar doce de corte.|300 g:1;600 g:1.8
+doces-de-corte|Doce de leite em barra|1300|Leite de fazenda, mexido até endurecer.|300 g:1;600 g:1.8
+doces-de-corte|Doce de mamão|1000|Mamão verde em barra, com cravo.|300 g:1
+doces-de-corte|Doce de buriti|1800|Buriti do Maranhão, raro e perfumado.|250 g:1
+rapaduras|Rapadura batida|800|Rapadura tradicional dos engenhos do Cariri.|500 g:1;1 kg:1.8
+rapaduras|Rapadura com amendoim|950|Rapadura com amendoim torrado.|250 g:1;500 g:1.8
+rapaduras|Rapadura com coco|950|Rapadura com coco ralado.|250 g:1;500 g:1.8
+rapaduras|Alfenim|1200|Doce de açúcar puxado, em figurinhas brancas.|caixa com 10:1;caixa com 20:1.8
+rapaduras|Mel de engenho|1600|Melaço de cana, para o cuscuz e o queijo.|garrafa 500 ml:1
+compotas|Doce de caju em calda|1900|Cajus inteiros em calda de açúcar.|vidro 400 g:1;vidro 800 g:1.8
+compotas|Doce de jaca|1700|Bagos de jaca em calda.|vidro 400 g:1
+compotas|Geleia de umbu|1600|O umbu do sertão em geleia, doce e azedinha.|vidro 250 g:1
+compotas|Geleia de cajá|1600|Cajá em geleia, ótima com queijo.|vidro 250 g:1
+compotas|Geleia de pimenta|1500|Pimenta dedo-de-moça com açúcar, para petiscos.|vidro 250 g:1
+compotas|Doce de mangaba|2100|Mangaba de Sergipe em calda.|vidro 400 g:1
+cachacas|Cachaça prata de alambique|3900|Destilada em alambique de cobre, descansada em inox.|375 ml:0.6;700 ml:1;1 litro:1.35
+cachacas|Cachaça envelhecida em umburana|6900|Dois anos em tonéis de umburana: notas de baunilha e canela.|375 ml:0.6;700 ml:1
+cachacas|Cachaça envelhecida em carvalho|7900|Três anos em carvalho europeu.|700 ml:1
+cachacas|Cachaça de jambu|5400|Com folhas de jambu, que dormecem a boca.|700 ml:1
+cachacas|Cachaça bálsamo|5900|Repousada em bálsamo, com sabor amadeirado.|700 ml:1
+licores|Licor de jenipapo|3200|O licor do São João, de jenipapo maduro.|375 ml:0.65;700 ml:1
+licores|Licor de cacau|3400|Cacau do sul da Bahia.|375 ml:0.65;700 ml:1
+licores|Licor de maracujá|2900|Doce e perfumado.|375 ml:0.65;700 ml:1
+licores|Licor de caju|2900|Caju maduro, para depois do almoço.|375 ml:0.65;700 ml:1
+licores|Licor de tamarindo|3100|Azedinho e encorpado.|700 ml:1
+polpas|Polpa de cajá|1200|Polpa congelada, sem conservantes.|1 kg:1;caixa com 5 kg:4.5
+polpas|Polpa de caju|1000|Polpa congelada de caju.|1 kg:1;caixa com 5 kg:4.5
+polpas|Polpa de acerola|1100|Rica em vitamina C.|1 kg:1;caixa com 5 kg:4.5
+polpas|Polpa de graviola|1500|Polpa cremosa de graviola.|1 kg:1
+polpas|Polpa de umbu|1300|Umbu do sertão baiano.|1 kg:1
+polpas|Suco integral de caju|1400|Sem açúcar, sem água: só caju.|garrafa 1 litro:1
+cafes|Café da Serra do Baturité|3600|Arábica sombreado do Ceará, torra média.|250 g:1;500 g:1.85
+cafes|Café de Taquaritinga do Norte|3800|Arábica do agreste pernambucano.|250 g:1;500 g:1.85
+cafes|Café da Chapada Diamantina|4200|Especial, notas de chocolate e frutas.|250 g:1;500 g:1.85
+cafes|Café torrado com rapadura|2400|Torrado à moda antiga, com rapadura.|250 g:1
+farinhas|Farinha de mandioca torrada|900|Farinha fina, torrada na casa de farinha.|1 kg:1;5 kg:4.4
+farinhas|Farinha d'água|1200|Mandioca fermentada, crocante, do Maranhão.|1 kg:1
+farinhas|Goma para tapioca|800|Goma fresca hidratada, pronta para a frigideira.|500 g:1;1 kg:1.8
+farinhas|Flocão de milho|600|Para o cuscuz nordestino.|500 g:1;1 kg:1.8
+farinhas|Farinha de castanha|2200|Castanha de caju moída.|250 g:1
+temperos|Colorau|500|Urucum moído, para dar cor e sabor.|100 g:1;500 g:3.8
+temperos|Pimenta de cheiro em conserva|1400|Pimentas inteiras no vinagre.|vidro 200 g:1
+temperos|Molho de pimenta da casa|1300|Pimenta malagueta curtida.|garrafa 150 ml:1
+temperos|Coentro desidratado|600|Folhas secas de coentro.|50 g:1
+temperos|Tempero baiano|700|Mistura de especiarias para moquecas e caldos.|100 g:1
+temperos|Sal de ervas do sertão|900|Sal com ervas secas da caatinga.|150 g:1
+castanhas|Castanha de caju torrada e salgada|3200|Castanha inteira tipo exportação.|250 g:1;500 g:1.85;1 kg:3.5
+castanhas|Castanha de caju natural|3000|Crua, sem sal.|250 g:1;500 g:1.85
+castanhas|Castanha de caju caramelizada|2800|Com açúcar caramelizado.|200 g:1
+castanhas|Amendoim torrado|900|Amendoim com casca, torrado na areia.|500 g:1
+castanhas|Mix nordestino|2600|Castanha, amendoim, coco e banana-passa.|300 g:1
+graos|Feijão verde|1500|Feijão de corda verde, debulhado e congelado.|1 kg:1
+graos|Fava branca|1300|Fava de moita, para a fava com charque.|500 g:1;1 kg:1.8
+graos|Feijão de corda|900|Feijão-caupi, o feijão do baião de dois.|1 kg:1
+graos|Milho para mungunzá|700|Milho branco descascado.|500 g:1
+graos|Arroz vermelho|1400|Arroz vermelho da Paraíba.|1 kg:1
+coalho|Queijo coalho em espetos|2400|Pronto para a brasa.|pacote com 6:1;pacote com 12:1.85
+coalho|Queijo coalho em barra|4200|De leite de vaca, do agreste.|500 g:0.55;1 kg:1
+coalho|Queijo coalho de cabra|5600|Feito com leite de cabra do Cariri.|500 g:1
+coalho|Queijo coalho temperado|2900|Com orégano e pimenta.|pacote com 6:1
+queijo-manteiga|Queijo manteiga|5400|Massa cozida na manteiga de garrafa.|500 g:0.55;1 kg:1
+queijo-manteiga|Queijo manteiga em cubos|3200|Para petisco ou para o cuscuz.|400 g:1
+queijo-manteiga|Requeijão do sertão|4600|O requeijão de corte, tostado.|500 g:1
+manteiga-de-garrafa|Manteiga de garrafa|2900|Manteiga clarificada, a manteiga da terra.|garrafa 250 ml:0.6;garrafa 500 ml:1;1 litro:1.85
+manteiga-de-garrafa|Manteiga de garrafa com ervas|3400|Com alho e ervas.|garrafa 500 ml:1
+ceramica|Panela de barro|8900|Panela de barro do Cabo de Santo Agostinho, para moqueca e feijão.|pequena:0.7;média:1;grande:1.4
+ceramica|Moringa de barro|6900|Mantém a água fresquinha.|1 litro:0.8;2 litros:1
+ceramica|Boneco de barro de Caruaru|7500|Figura do Alto do Moura, pintada à mão.|vaqueiro:1;sanfoneiro:1;rendeira:1;Lampião e Maria Bonita:1.6
+ceramica|Travessa de cerâmica|5900|Travessa esmaltada de Tracunhaém.|média:1;grande:1.35
+ceramica|Filtro de barro|14900|O filtro de barro de vela, clássico da cozinha.|4 litros:0.85;6 litros:1
+rendas|Toalha de renda renascença|29900|Renda renascença do Cariri paraibano.|redonda 1 m:0.7;mesa 4 lugares:1;mesa 6 lugares:1.4
+rendas|Caminho de mesa em labirinto|15900|Labirinto bordado à mão no Ceará.|1 m:0.7;1,5 m:1
+rendas|Pano de prato bordado|2900|Algodão bordado à mão.|unidade:1;kit com 3:2.6
+rendas|Bolsa de renda de bilro|18900|Renda de bilro das rendeiras de Aquiraz.|pequena:1;grande:1.35
+palha|Cesto de palha de carnaúba|5900|Trançado à mão no Piauí.|pequeno:0.7;médio:1;grande:1.45
+palha|Chapéu de palha|4500|Chapéu de vaqueiro de palha de carnaúba.|P:1;M:1;G:1
+palha|Bolsa de buriti|12900|Fibra de buriti dos Lençóis Maranhenses.|pequena:0.7;média:1
+palha|Jogo americano de palha|6900|Kit com 4 peças.|kit com 4:1;kit com 6:1.4
+cordel|Folheto de cordel|500|Folheto impresso em xilogravura, de poetas de Juazeiro.|A Chegada de Lampião no Inferno:1;O Pavão Misterioso:1;A Peleja do Cego Aderaldo:1;O Romance do Pavão:1;Viagem a São Saruê:1;kit com 10 folhetos:8
+cordel|Xilogravura assinada|9500|Gravura em madeira impressa à mão, assinada pelo artista.|A4:1;A3:1.6
+cordel|Matriz de xilogravura|24000|A matriz de madeira entalhada, peça única.|unidade:1`
+
+# the home's sections: title | subtitle | how to pick the products
+const SECTIONS = `Destaques da semana|O que está saindo da cozinha e dos alambiques agora|featured
+Promoções|Preços de feira, enquanto durar o estoque|sale
+Novidades|Chegaram há pouco|newest
+Para o São João|Licores, pamonha, milho e o que não pode faltar na festa|saojoao`
+
+const FIRST = "Ana Maria João José Francisca Antônio Luiza Pedro Raimunda Francisco Severina Luiz Joana Paulo Rita Carlos Helena Marcos Tereza Rafael Beatriz Lucas Juliana Gabriel Camila Mateus Larissa Thiago Fernanda Bruno"
+const LAST = "Silva Souza Oliveira Santos Lima Pereira Ferreira Costa Rodrigues Almeida Nascimento Araújo Barbosa Cavalcanti Albuquerque Bezerra Lins Torres Menezes Brandão"
+const CITIES = "Recife|PE|50|Olinda|PE|53|Fortaleza|CE|60|Salvador|BA|40|João Pessoa|PB|58|Natal|RN|59|Maceió|AL|57|Aracaju|SE|49|Teresina|PI|64|São Luís|MA|65|São Paulo|SP|01|Rio de Janeiro|RJ|20|Belo Horizonte|MG|30|Curitiba|PR|80|Porto Alegre|RS|90|Brasília|DF|70|Belém|PA|66"
+const STREETS = "Rua da Aurora|Avenida Boa Viagem|Rua do Sol|Rua das Flores|Avenida Beira Mar|Rua da Palma|Travessa do Carmo|Rua Nova|Avenida Sete de Setembro|Rua do Imperador"
+const DISTRICTS = "Centro|Boa Vista|Aldeota|Meireles|Pituba|Tambaú|Ponta Negra|Pajuçara|Jardins|Graças"
+
+# a deterministic pseudo-random sequence (the same data every time)
+let seed_state: int = 20251113
+
+fn rnd(n: int) -> int {
+  seed_state = (seed_state * 1103515245 + 12345) % 2147483648
+  if n <= 0 { return 0 }
+  return (seed_state / 65536) % n
+}
+
+fn pick(list: []str) -> str { return list[rnd(len(list))] }
+
+fn lines(s: str) -> []str {
+  out := []str{}
+  for _, l := range strings.split(s, "\n") {
+    if strings.trim_space(l) != "" { out = append(out, l) }
+  }
+  return out
+}
+
+fn round_price(c: int) -> int {
+  # prices end in ,90
+  r := (c + 50) / 100 * 100 - 10
+  if r < 190 { r = 190 }
+  return r
+}
+
+export fn run() {
+  if db.scalar_int("select count(*) as n from products", []any{}) > 0 {
+    os.eprintln("seed: the database already has products (./shop reset to start over)")
+    os.exit(1)
+  }
+  started := os.nanotime()
+  db.exec("insert into settings (key, value) values ('store_name', 'Empório Caju'), ('free_shipping_cents', '25000'), ('catalog_version', '1') on conflict (key) do nothing", []any{})
+
+  # shipping, by CEP range
+  rates := []str{"Nordeste|40000000|65999999|1590|4", "Sudeste|01000000|39999999|2490|6", "Sul|80000000|99999999|2990|8", "Centro-Oeste|70000000|79999999|2790|7", "Norte|66000000|69999999|3490|10"}
+  for _, r := range rates {
+    f := strings.split(r, "|")
+    db.exec("insert into shipping_rates (name, cep_from, cep_to, price_cents, days) values ($1, $2, $3, $4, $5)", []any{f[0], catalog.atoi_or(f[1], 0), catalog.atoi_or(f[2], 0), catalog.atoi_or(f[3], 0), catalog.atoi_or(f[4], 0)})
+  }
+
+  # categories
+  cat_ids := map[str]int{}
+  top_of := map[str]str{}
+  top := 0
+  top_slug := ""
+  pos := 0
+  for _, l := range lines(CATEGORIES) {
+    child := strings.has_prefix(l, "  ")
+    f := strings.split(strings.trim_space(l), "|")
+    if !child {
+      top = db.row("insert into categories (name, slug, description, position) values ($1, $2, $3, $4) returning id", []any{f[0], f[1], f[2], len(cat_ids)}).get_int("id")
+      top_slug = f[1]
+      cat_ids[f[1]] = top
+      pos = 0
+    } else {
+      cat_ids[f[0]] = db.row("insert into categories (parent_id, name, slug, description, position) values ($1, $2, $3, $4, $5) returning id", []any{top, f[1], f[0], f[2], pos}).get_int("id")
+      top_of[f[0]] = top_slug
+      pos++
+    }
+  }
+
+  # products: each base with its variants
+  hues := map[str]int{"doces": 28, "bebidas": 8, "mercearia": 42, "queijos": 50, "artesanato": 18}
+  ids := []int{}
+  by_top := map[str][]int{}
+  sale_ids := []int{}
+  n := 0
+  for _, l := range lines(PRODUCTS) {
+    f := strings.split(l, "|")
+    variants := strings.split(f[4], ";")
+    for _, v := range variants {
+      kv := strings.split(v, ":")
+      factor := 1.0
+      if len(kv) > 1 { factor = parse_factor(kv[1]) }
+      name := f[1] + " " + kv[0]
+      if len(variants) == 1 && (strings.has_prefix(kv[0], "unidade") || strings.has_prefix(kv[0], "vidro") || strings.has_prefix(kv[0], "garrafa")) { name = f[1] + " (" + kv[0] + ")" }
+      price := round_price(int(num(catalog.atoi_or(f[2], 1000)) * factor))
+      let sale: any = nil
+      if rnd(100) < 22 {
+        sale = round_price(price * (70 + rnd(21)) / 100)
+        if sale.(int) >= price { sale = nil }
+      }
+      stock := 0
+      roll := rnd(100)
+      if roll < 8 { stock = 0 } else if roll < 20 { stock = 1 + rnd(5) } else { stock = 10 + rnd(140) }
+      hue := (hues[top_of[f[0]]] + rnd(40) - 20 + 360) % 360
+      days_ago := rnd(120)
+      id := db.row("insert into products (category_id, name, slug, description, price_cents, sale_cents, stock, active, hue, created_at, updated_at) values ($1, $2, $3, $4, $5, $6, $7, true, $8, now() - make_interval(days => $9), now() - make_interval(days => $9)) returning id", []any{cat_ids[f[0]], name, unique_slug(db.slugify(name)), f[3] + " " + describe(f[0], kv[0]), price, sale, stock, hue, days_ago}).get_int("id")
+      if stock > 0 { db.exec("insert into stock_moves (product_id, delta, reason, created_at) values ($1, $2, 'Estoque inicial', now() - make_interval(days => $3))", []any{id, stock, days_ago}) }
+      ids = append(ids, id)
+      by_top[top_of[f[0]]] = append(by_top[top_of[f[0]]], id)
+      if sale != nil { sale_ids = append(sale_ids, id) }
+      n++
+    }
+  }
+
+  # the home's sections
+  si := 0
+  for _, l := range lines(SECTIONS) {
+    f := strings.split(l, "|")
+    sid := db.row("insert into sections (title, subtitle, position, active) values ($1, $2, $3, true) returning id", []any{f[0], f[1], si}).get_int("id")
+    picked := []int{}
+    switch f[2] {
+    case "featured":
+      for i := 0; i < 8; i++ { picked = append(picked, ids[rnd(len(ids))]) }
+    case "sale":
+      picked = sale_ids
+    case "newest":
+      rows := db.query("select id from products order by created_at desc limit 8", []any{})
+      while rows.next() { picked = append(picked, rows.get_int("id")) }
+    case "saojoao":
+      rows := db.query("select p.id from products p join categories c on c.id = p.category_id where c.slug in ('licores', 'graos', 'rapaduras') or p.name ilike '%chapéu%' order by p.id limit 10", []any{})
+      while rows.next() { picked = append(picked, rows.get_int("id")) }
+    }
+    for i, pid := range picked {
+      if i >= 12 { break }
+      db.exec("insert into section_products (section_id, product_id, position) values ($1, $2, $3) on conflict do nothing", []any{sid, pid, i})
+    }
+    si++
+  }
+
+  # coupons
+  db.exec("insert into coupons (code, kind, value, min_cents, max_uses, expires_at) values ('BEMVINDO10', 'percent', 10, 0, null, null), ('FRETEJUNINO', 'fixed', 1590, 10000, 500, now() + interval '60 days'), ('CAJU20', 'percent', 20, 20000, 100, now() + interval '30 days'), ('NATAL2024', 'percent', 15, 0, null, now() - interval '300 days')", []any{})
+
+  # people: the admin, an operator, customers (one password hash for all of them: they are fake,
+  # and PBKDF2 is slow on purpose)
+  admin_pw := os.getenv("ADMIN_PASSWORD")
+  if admin_pw == "" { admin_pw = "admin123" }
+  db.exec("insert into customers (name, email, password_hash, role) values ('Administração', 'admin@emporiocaju.dev', $1, 'admin'), ('Operação', 'operador@emporiocaju.dev', $2, 'operator')", []any{auth.hash_password(admin_pw), auth.hash_password("operador123")})
+  demo := auth.hash_password("cliente123")
+  firsts := strings.split(FIRST, " ")
+  lasts := strings.split(LAST, " ")
+  cities := strings.split(CITIES, "|")
+  streets := strings.split(STREETS, "|")
+  districts := strings.split(DISTRICTS, "|")
+  customers := []int{}
+  addr_of := map[int]int{}
+  for i := 0; i < 60; i++ {
+    first := pick(firsts)
+    last := pick(lasts) + " " + pick(lasts)
+    email := strings.to_lower(db.slugify(first) + "." + db.slugify(strings.split(last, " ")[0]) + str(i) + "@exemplo.com")
+    if i == 0 {
+      first = "Maria"
+      last = "Cliente"
+      email = "cliente@emporiocaju.dev"
+    }
+    days_ago := 1 + rnd(150)
+    cid := db.row("insert into customers (name, email, phone, password_hash, created_at) values ($1, $2, $3, $4, now() - make_interval(days => $5)) returning id", []any{first + " " + last, email, "(81) 9" + str(1000 + rnd(9000)) + "-" + str(1000 + rnd(9000)), demo, days_ago}).get_int("id")
+    k := rnd(len(cities) / 3) * 3
+    if i == 0 { k = 0 }
+    cep := cities[k + 2] + str(100000 + rnd(899999))
+    while len(cep) < 8 { cep = cep + "0" }
+    addr_of[cid] = db.row("insert into addresses (customer_id, label, cep, street, number, district, city, state) values ($1, 'Casa', $2, $3, $4, $5, $6, $7) returning id", []any{cid, cep[0:8], pick(streets), str(10 + rnd(1500)), pick(districts), cities[k], cities[k + 1]}).get_int("id")
+    customers = append(customers, cid)
+  }
+
+  # three months of orders
+  statuses := []str{"delivered", "delivered", "delivered", "delivered", "shipped", "paid", "pending", "canceled"}
+  orders := 0
+  for i := 0; i < 420; i++ {
+    cid := customers[rnd(len(customers))]
+    days_ago := rnd(90)
+    if i > 380 { days_ago = 0 }
+    minutes := rnd(1440)
+    status := statuses[rnd(len(statuses))]
+    if days_ago > 10 && (status == "pending" || status == "paid") { status = "delivered" }
+    if days_ago <= 2 && status == "delivered" { status = "paid" }
+    count := 1 + rnd(4)
+    chosen := map[int]int{}
+    subtotal := 0
+    for j := 0; j < count; j++ { chosen[ids[rnd(len(ids))]] = 1 + rnd(3) }
+    a := db.row("select * from addresses where id = $1", []any{addr_of[cid]})
+    oid := db.row("insert into orders (customer_id, status, subtotal_cents, shipping_cents, total_cents, ship_name, ship_cep, ship_street, ship_number, ship_district, ship_city, ship_state, shipping_method, shipping_days, created_at, updated_at) select $1, $2, 0, r.price_cents, 0, c.name, $3, $4, $5, $6, $7, $8, r.name, r.days, now() - make_interval(days => $9, mins => $10), now() - make_interval(days => $9, mins => $10) from customers c, shipping_rates r where c.id = $1 and $11 between r.cep_from and r.cep_to returning id", []any{cid, status, a.get_str("cep"), a.get_str("street"), a.get_str("number"), a.get_str("district"), a.get_str("city"), a.get_str("state"), days_ago, minutes, catalog.atoi_or(a.get_str("cep"), 0)}).get_int("id")
+    for pid, q := range chosen {
+      p := db.row("select name, coalesce(sale_cents, price_cents) as unit from products where id = $1", []any{pid})
+      db.exec("insert into order_items (order_id, product_id, name, unit_cents, qty) values ($1, $2, $3, $4, $5)", []any{oid, pid, p.get_str("name"), p.get_int("unit"), q})
+      subtotal += p.get_int("unit") * q
+    }
+    db.exec("update orders set subtotal_cents = $2::bigint, shipping_cents = case when $2::bigint >= 25000 then 0 else shipping_cents end, total_cents = $2::bigint + case when $2::bigint >= 25000 then 0 else shipping_cents end where id = $1", []any{oid, subtotal})
+    db.exec("insert into order_events (order_id, status, note, actor_id, created_at) select id, 'pending', 'Pedido criado', customer_id, created_at from orders where id = $1", []any{oid})
+    steps := map[str][]str{"paid": []str{"paid"}, "shipped": []str{"paid", "shipped"}, "delivered": []str{"paid", "shipped", "delivered"}, "canceled": []str{"canceled"}}
+    for k2, s := range steps[status] {
+      db.exec("insert into order_events (order_id, status, note, created_at) select id, $2, '', created_at + make_interval(hours => $3) from orders where id = $1", []any{oid, s, (k2 + 1) * 20})
+    }
+    if status == "shipped" || status == "delivered" { db.exec("update orders set tracking_code = $2 where id = $1", []any{oid, "BR" + str(100000000 + rnd(899999999)) + "NE"}) }
+    orders++
+  }
+  db.exec("insert into audit_log (action, entity, detail) values ('seed', 'loja', $1)", []any{"dados de demonstração: " + str(n) + " produtos, " + str(len(customers)) + " clientes, " + str(orders) + " pedidos"})
+  ms := (os.nanotime() - started) / 1000000
+  print("seed: " + str(len(cat_ids)) + " categories, " + str(n) + " products, " + str(len(customers)) + " customers, " + str(orders) + " orders (" + str(ms) + " ms)")
+  print("  admin: admin@emporiocaju.dev / " + admin_pw + "   operator: operador@emporiocaju.dev / operador123   customer: cliente@emporiocaju.dev / cliente123")
+}
+
+fn parse_factor(s: str) -> num {
+  whole := 0
+  frac := 0.0
+  scale := 0.1
+  dot := false
+  for i := 0; i < len(s); i++ {
+    ch := int(s[i])
+    if ch == '.' {
+      dot = true
+    } else if ch >= '0' && ch <= '9' {
+      if dot {
+        frac = frac + scale * num(ch - '0')
+        scale = scale / 10.0
+      } else {
+        whole = whole * 10 + (ch - '0')
+      }
+    }
+  }
+  return num(whole) + frac
+}
+
+let used_slugs = map[str]bool{}
+
+fn unique_slug(s: str) -> str {
+  out := s
+  k := 2
+  while used_slugs[out] {
+    out = s + "-" + str(k)
+    k++
+  }
+  used_slugs[out] = true
+  return out
+}
+
+fn describe(cat: str, variant: str) -> str {
+  return "Apresentação: " + variant + "."
+}
+
+# drops every table (development)
+export fn reset() {
+  db.exec("drop schema public cascade; create schema public", []any{})
+}

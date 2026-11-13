@@ -1,0 +1,462 @@
+# The panel's queries and changes: the dashboard, the products, categories, sections, orders,
+# customers, coupons and settings.
+import "../caju-pg/pg"
+import "std/strings"
+import "./model"
+import "./back/db"
+import "./back/catalog"
+import "./back/orders"
+
+export const PER_PAGE = 30
+
+fn pages_of(total: int) -> int {
+  p := (total + PER_PAGE - 1) / PER_PAGE
+  if p < 1 { return 1 }
+  return p
+}
+
+fn clamp_page(l: *model.Listing) {
+  l.pages = pages_of(l.total)
+  if l.page < 1 { l.page = 1 }
+  if l.page > l.pages { l.page = l.pages }
+}
+
+# ---------------------------------------------------------------- dashboard
+
+export fn dashboard() -> *model.Dashboard {
+  d := &model.Dashboard{stats: []model.Stat{}, days: []model.DayTotal{}, top: []model.TopProduct{}, by_status: []model.Facet{}, low_stock: []model.Product{}, recent: []model.Order{}}
+  r := db.row("select (select coalesce(sum(total_cents), 0) from orders where status <> 'canceled' and created_at >= date_trunc('day', now() at time zone 'America/Recife') at time zone 'America/Recife') as today, (select count(*) from orders where created_at >= date_trunc('day', now() at time zone 'America/Recife') at time zone 'America/Recife') as today_n, (select coalesce(sum(total_cents), 0) from orders where status <> 'canceled' and created_at >= date_trunc('month', now() at time zone 'America/Recife') at time zone 'America/Recife') as month, (select count(*) from orders where status <> 'canceled' and created_at >= date_trunc('month', now() at time zone 'America/Recife') at time zone 'America/Recife') as month_n, (select count(*) from orders where status = 'paid') as to_ship, (select count(*) from orders where status = 'pending') as pending, (select count(*) from products where active and stock <= 5) as low, (select count(*) from customers where role = 'customer' and created_at >= now() - interval '30 days') as new_customers", []any{})
+  avg := 0
+  if r.get_int("month_n") > 0 { avg = r.get_int("month") / r.get_int("month_n") }
+  d.stats = append(d.stats, model.Stat{label: "Vendas hoje", value: model.money(r.get_int("today")), note: model.plural(r.get_int("today_n"), "pedido", "pedidos"), href: "/admin/pedidos"})
+  d.stats = append(d.stats, model.Stat{label: "Vendas no mês", value: model.money(r.get_int("month")), note: "ticket médio " + model.money(avg), href: "/admin/pedidos"})
+  d.stats = append(d.stats, model.Stat{label: "Para enviar", value: str(r.get_int("to_ship")), note: model.plural(r.get_int("pending"), "aguardando pagamento", "aguardando pagamento"), href: "/admin/pedidos?f=paid"})
+  d.stats = append(d.stats, model.Stat{label: "Estoque baixo", value: str(r.get_int("low")), note: "produtos com até 5 unidades", href: "/admin/produtos?f=low"})
+  d.stats = append(d.stats, model.Stat{label: "Clientes novos", value: str(r.get_int("new_customers")), note: "nos últimos 30 dias", href: "/admin/clientes"})
+
+  days := db.query("select to_char(d, 'DD/MM') as day, coalesce(sum(o.total_cents), 0) as total, count(o.id) as n from generate_series((now() at time zone 'America/Recife')::date - 29, (now() at time zone 'America/Recife')::date, interval '1 day') d left join orders o on (o.created_at at time zone 'America/Recife')::date = d::date and o.status <> 'canceled' group by d order by d", []any{})
+  while days.next() { d.days = append(d.days, model.DayTotal{day: days.get_str("day"), total: days.get_int("total"), orders: days.get_int("n")}) }
+
+  top := db.query("select oi.product_id, oi.name, sum(oi.qty)::int as qty, sum(oi.qty * oi.unit_cents) as total from order_items oi join orders o on o.id = oi.order_id where o.status <> 'canceled' and o.created_at >= now() - interval '30 days' group by oi.product_id, oi.name order by qty desc, total desc limit 8", []any{})
+  while top.next() { d.top = append(d.top, model.TopProduct{id: top.get_int("product_id"), name: top.get_str("name"), qty: top.get_int("qty"), total: top.get_int("total")}) }
+
+  st := db.query("select status, count(*) as n from orders group by status", []any{})
+  counts := map[str]int{}
+  while st.next() { counts[st.get_str("status")] = st.get_int("n") }
+  for _, s := range []str{"pending", "paid", "shipped", "delivered", "canceled"} {
+    d.by_status = append(d.by_status, model.Facet{name: model.status_label(s), slug: s, count: counts[s]})
+  }
+
+  d.low_stock = catalog.products_of(db.query("select " + catalog.product_cols() + " from products p join categories c on c.id = p.category_id where p.active and p.stock <= 5 order by p.stock, p.name limit 8", []any{}))
+  d.recent = orders.orders_of(db.query("select " + orders.order_cols() + " from orders o join customers cu on cu.id = o.customer_id order by o.id desc limit 8", []any{}))
+  return d
+}
+
+# ---------------------------------------------------------------- products
+
+export fn product_list(l: *model.Listing) -> []model.Product {
+  conds := []str{"true"}
+  args := []any{}
+  if strings.trim_space(l.q) != "" {
+    args = append(args, db.like(strings.trim_space(l.q)))
+    conds = append(conds, "(f_unaccent(p.name) ilike f_unaccent($" + str(len(args)) + ") or p.slug ilike $" + str(len(args)) + " or p.id::text = $" + str(len(args) + 1) + ")")
+    args = append(args, strings.trim_space(l.q))
+  }
+  switch l.filter {
+  case "active": conds = append(conds, "p.active")
+  case "inactive": conds = append(conds, "not p.active")
+  case "out": conds = append(conds, "p.stock = 0")
+  case "low": conds = append(conds, "p.active and p.stock <= 5")
+  case "sale": conds = append(conds, "p.sale_cents is not null")
+  }
+  if l.filter2 != "" {
+    args = append(args, catalog.atoi_or(l.filter2, 0))
+    conds = append(conds, "(c.id = $" + str(len(args)) + " or c.parent_id = $" + str(len(args)) + ")")
+  }
+  where := " where " + strings.join(conds, " and ")
+  l.total = db.scalar_int("select count(*) as n from products p join categories c on c.id = p.category_id" + where, args)
+  clamp_page(l)
+  order := "p.id desc"
+  switch l.sort {
+  case "name": order = "p.name, p.id"
+  case "price": order = "p.price_cents, p.id"
+  case "stock": order = "p.stock, p.id"
+  case "updated": order = "p.updated_at desc, p.id desc"
+  }
+  args = append(args, PER_PAGE)
+  args = append(args, (l.page - 1) * PER_PAGE)
+  return catalog.products_of(db.query("select " + catalog.product_cols() + " from products p join categories c on c.id = p.category_id" + where + " order by " + order + " limit $" + str(len(args) - 1) + " offset $" + str(len(args)), args))
+}
+
+# checks a product form: (errors, the values ready for the database)
+export struct ProductInput {
+  name: str
+  slug: str
+  description: str
+  category_id: int
+  price: int
+  sale: int
+  stock: int
+  active: bool
+  hue: int
+}
+
+export fn check_product(f: map[str]str, id: int, creating: bool) -> (map[str]str, ProductInput) {
+  errs := map[str]str{}
+  pi := ProductInput{name: strings.trim_space(f["name"]), description: strings.trim_space(f["description"]), active: f["active"] != ""}
+  if len(pi.name) < 3 { errs["name"] = "Dê um nome com pelo menos 3 letras." }
+  pi.slug = db.slugify(f["slug"])
+  if pi.slug == "" { pi.slug = db.slugify(pi.name) }
+  if pi.slug != "" && db.row("select 1 from products where slug = $1 and id <> $2", []any{pi.slug, id}) != nil { errs["slug"] = "Já existe um produto com este endereço." }
+  pi.category_id = catalog.atoi_or(f["category_id"], 0)
+  if catalog.category_name(pi.category_id) == "" { errs["category_id"] = "Escolha uma categoria." }
+  pi.price = model.parse_reais(f["price"])
+  if pi.price <= 0 { errs["price"] = "Informe o preço, como 12,90." }
+  pi.sale = 0
+  if strings.trim_space(f["sale"]) != "" {
+    pi.sale = model.parse_reais(f["sale"])
+    if pi.sale <= 0 {
+      errs["sale"] = "Informe o preço promocional, como 9,90, ou deixe em branco."
+    } else if pi.price > 0 && pi.sale >= pi.price {
+      errs["sale"] = "O preço promocional deve ser menor que o preço."
+    }
+  }
+  pi.stock = 0
+  if creating {
+    pi.stock = catalog.atoi_or(strings.trim_space(f["stock"]), -1)
+    if pi.stock < 0 { errs["stock"] = "Informe a quantidade em estoque." }
+  }
+  pi.hue = catalog.atoi_or(f["hue"], 20) % 360
+  if pi.hue < 0 { pi.hue = 20 }
+  return errs, pi
+}
+
+fn nullable(v: int) -> any {
+  if v <= 0 { return nil }
+  return v
+}
+
+export fn create_product(pi: ProductInput, actor_id: int) -> int {
+  id := db.row("insert into products (category_id, name, slug, description, price_cents, sale_cents, stock, active, hue) values ($1, $2, $3, $4, $5, $6, $7, $8, $9) returning id", []any{pi.category_id, pi.name, pi.slug, pi.description, pi.price, nullable(pi.sale), pi.stock, pi.active, pi.hue}).get_int("id")
+  if pi.stock > 0 { db.exec("insert into stock_moves (product_id, delta, reason, actor_id) values ($1, $2, 'Estoque inicial', $3)", []any{id, pi.stock, actor_id}) }
+  catalog.touch()
+  return id
+}
+
+# updates a product; returns what changed, for the audit log
+export fn update_product(id: int, pi: ProductInput) -> str {
+  old := catalog.product_by_id(id)
+  db.exec("update products set category_id = $2, name = $3, slug = $4, description = $5, price_cents = $6, sale_cents = $7, active = $8, hue = $9, updated_at = now() where id = $1", []any{id, pi.category_id, pi.name, pi.slug, pi.description, pi.price, nullable(pi.sale), pi.active, pi.hue})
+  catalog.touch()
+  changes := []str{}
+  if old.name != pi.name { changes = append(changes, "nome: " + old.name + " → " + pi.name) }
+  if old.price != pi.price { changes = append(changes, "preço: " + model.money(old.price) + " → " + model.money(pi.price)) }
+  if old.sale != pi.sale { changes = append(changes, "promoção: " + money_or_none(old.sale) + " → " + money_or_none(pi.sale)) }
+  if old.active != pi.active {
+    if pi.active { changes = append(changes, "ativado") } else { changes = append(changes, "desativado") }
+  }
+  if old.category_id != pi.category_id { changes = append(changes, "categoria: " + catalog.category_name(old.category_id) + " → " + catalog.category_name(pi.category_id)) }
+  if old.description != pi.description { changes = append(changes, "descrição") }
+  if old.slug != pi.slug { changes = append(changes, "endereço: " + old.slug + " → " + pi.slug) }
+  return strings.join(changes, "; ")
+}
+
+fn money_or_none(c: int) -> str {
+  if c <= 0 { return "sem" }
+  return model.money(c)
+}
+
+# a stock adjustment: delta units (negative takes out), with its reason; "" ok, otherwise the reason
+export fn adjust_stock(id: int, delta: int, reason: str, actor_id: int) -> str {
+  if delta == 0 { return "Informe a quantidade (positiva para entrada, negativa para saída)." }
+  if strings.trim_space(reason) == "" { return "Informe o motivo." }
+  n := db.exec("update products set stock = stock + $2, updated_at = now() where id = $1 and stock + $2 >= 0", []any{id, delta})
+  if n == 0 { return "O estoque não pode ficar negativo." }
+  db.exec("insert into stock_moves (product_id, delta, reason, actor_id) values ($1, $2, $3, $4)", []any{id, delta, strings.trim_space(reason), actor_id})
+  return ""
+}
+
+export fn stock_moves(id: int) -> []model.StockMove {
+  rows := db.query("select m.delta, m.reason, coalesce(c.name, '') as actor, coalesce(m.order_id, 0) as order_id, to_char(m.created_at at time zone 'America/Recife', 'DD/MM/YYYY HH24:MI') as at from stock_moves m left join customers c on c.id = m.actor_id where m.product_id = $1 order by m.id desc limit 30", []any{id})
+  out := []model.StockMove{}
+  while rows.next() { out = append(out, model.StockMove{delta: rows.get_int("delta"), reason: rows.get_str("reason"), actor: rows.get_str("actor"), order_id: rows.get_int("order_id"), at: rows.get_str("at")}) }
+  return out
+}
+
+export fn sections_of(product_id: int) -> []int {
+  rows := db.query("select section_id from section_products where product_id = $1", []any{product_id})
+  out := []int{}
+  while rows.next() { out = append(out, rows.get_int("section_id")) }
+  return out
+}
+
+# the sections a product is in, as the form's checkboxes say
+export fn set_product_sections(product_id: int, ids: []int) {
+  db.exec("delete from section_products where product_id = $1 and not (section_id = any($2::bigint[]))", []any{product_id, catalog.int_array(ids)})
+  for _, sid := range ids {
+    db.exec("insert into section_products (section_id, product_id, position) values ($1, $2, coalesce((select max(position) + 1 from section_products where section_id = $1), 0)) on conflict do nothing", []any{sid, product_id})
+  }
+}
+
+# a bulk action on the selected products: activate, deactivate, or move to a category
+export fn bulk(ids: []int, action: str, category_id: int) -> int {
+  if len(ids) == 0 { return 0 }
+  arr := catalog.int_array(ids)
+  n := 0
+  switch action {
+  case "activate": n = db.exec("update products set active = true, updated_at = now() where id = any($1::bigint[])", []any{arr})
+  case "deactivate": n = db.exec("update products set active = false, updated_at = now() where id = any($1::bigint[])", []any{arr})
+  case "move":
+    if catalog.category_name(category_id) != "" { n = db.exec("update products set category_id = $2, updated_at = now() where id = any($1::bigint[])", []any{arr, category_id}) }
+  }
+  catalog.touch()
+  return n
+}
+
+# ---------------------------------------------------------------- categories
+
+export fn save_category(id: int, f: map[str]str) -> (map[str]str, int) {
+  errs := map[str]str{}
+  name := strings.trim_space(f["name"])
+  if len(name) < 2 { errs["name"] = "Dê um nome." }
+  slug := db.slugify(f["slug"])
+  if slug == "" { slug = db.slugify(name) }
+  if db.row("select 1 from categories where slug = $1 and id <> $2", []any{slug, id}) != nil { errs["slug"] = "Já existe uma categoria com este endereço." }
+  parent := catalog.atoi_or(f["parent_id"], 0)
+  if parent > 0 {
+    pr := db.row("select parent_id from categories where id = $1", []any{parent})
+    if pr == nil || !pr.is_null("parent_id") {
+      errs["parent_id"] = "A categoria-mãe deve ser de primeiro nível."
+    } else if parent == id {
+      errs["parent_id"] = "Uma categoria não pode estar dentro de si mesma."
+    } else if id > 0 && db.row("select 1 from categories where parent_id = $1", []any{id}) != nil {
+      errs["parent_id"] = "Esta categoria tem subcategorias, então fica no primeiro nível."
+    }
+  }
+  if len(errs) > 0 { return errs, 0 }
+  pos := catalog.atoi_or(f["position"], 0)
+  if id == 0 {
+    id = db.row("insert into categories (parent_id, name, slug, description, position) values ($1, $2, $3, $4, $5) returning id", []any{nullable(parent), name, slug, strings.trim_space(f["description"]), pos}).get_int("id")
+  } else {
+    db.exec("update categories set parent_id = $2, name = $3, slug = $4, description = $5, position = $6 where id = $1", []any{id, nullable(parent), name, slug, strings.trim_space(f["description"]), pos})
+  }
+  catalog.touch()
+  return errs, id
+}
+
+export fn delete_category(id: int) -> str {
+  if db.row("select 1 from categories where parent_id = $1", []any{id}) != nil { return "Remova ou mova as subcategorias primeiro." }
+  n := db.scalar_int("select count(*) as n from products where category_id = $1", []any{id})
+  if n > 0 { return "Mova os " + model.plural(n, "produto", "produtos") + " desta categoria primeiro." }
+  db.exec("delete from categories where id = $1", []any{id})
+  catalog.touch()
+  return ""
+}
+
+# ---------------------------------------------------------------- sections
+
+export fn section_list() -> []model.Section {
+  rows := db.query("select s.id, s.title, s.subtitle, s.position, s.active, (select count(*) from section_products sp where sp.section_id = s.id) as n from sections s order by s.position, s.id", []any{})
+  out := []model.Section{}
+  while rows.next() { out = append(out, model.Section{id: rows.get_int("id"), title: rows.get_str("title"), subtitle: rows.get_str("subtitle"), position: rows.get_int("position"), active: rows.get_bool("active"), count: rows.get_int("n"), products: []model.Product{}}) }
+  return out
+}
+
+export fn section(id: int) -> *model.Section {
+  r := db.row("select id, title, subtitle, position, active from sections where id = $1", []any{id})
+  if r == nil { return nil }
+  s := &model.Section{id: r.get_int("id"), title: r.get_str("title"), subtitle: r.get_str("subtitle"), position: r.get_int("position"), active: r.get_bool("active")}
+  s.products = catalog.products_of(db.query("select " + catalog.product_cols() + " from section_products sp join products p on p.id = sp.product_id join categories c on c.id = p.category_id where sp.section_id = $1 order by sp.position, p.id", []any{id}))
+  s.count = len(s.products)
+  return s
+}
+
+export fn save_section(id: int, f: map[str]str) -> (map[str]str, int) {
+  errs := map[str]str{}
+  title := strings.trim_space(f["title"])
+  if len(title) < 2 { errs["title"] = "Dê um título." }
+  if len(errs) > 0 { return errs, 0 }
+  pos := catalog.atoi_or(f["position"], 0)
+  if id == 0 {
+    id = db.row("insert into sections (title, subtitle, position, active) values ($1, $2, $3, $4) returning id", []any{title, strings.trim_space(f["subtitle"]), pos, f["active"] != ""}).get_int("id")
+  } else {
+    db.exec("update sections set title = $2, subtitle = $3, position = $4, active = $5 where id = $1", []any{id, title, strings.trim_space(f["subtitle"]), pos, f["active"] != ""})
+  }
+  return errs, id
+}
+
+# a section's products, in the given order (ids)
+export fn set_section_products(id: int, ids: []int) {
+  db.tx(fn(c: *pg.Conn) -> error {
+    db.must_exec(c, "delete from section_products where section_id = $1", []any{id})
+    for i, pid := range ids {
+      db.must_exec(c, "insert into section_products (section_id, product_id, position) values ($1, $2, $3) on conflict do nothing", []any{id, pid, i})
+    }
+    return nil
+  })
+}
+
+# ---------------------------------------------------------------- orders
+
+export fn order_list(l: *model.Listing) -> []model.Order {
+  conds := []str{"true"}
+  args := []any{}
+  q := strings.trim_space(l.q)
+  if q != "" {
+    args = append(args, db.like(q))
+    n := str(len(args))
+    args = append(args, strings.trim_prefix(q, "#"))
+    conds = append(conds, "(o.id::text = $" + str(len(args)) + " or f_unaccent(cu.name) ilike f_unaccent($" + n + ") or cu.email ilike $" + n + ")")
+  }
+  if l.filter != "" {
+    args = append(args, l.filter)
+    conds = append(conds, "o.status = $" + str(len(args)))
+  }
+  switch l.filter2 {
+  case "today": conds = append(conds, "o.created_at >= date_trunc('day', now() at time zone 'America/Recife') at time zone 'America/Recife'")
+  case "7d": conds = append(conds, "o.created_at >= now() - interval '7 days'")
+  case "30d": conds = append(conds, "o.created_at >= now() - interval '30 days'")
+  }
+  where := " where " + strings.join(conds, " and ")
+  l.total = db.scalar_int("select count(*) as n from orders o join customers cu on cu.id = o.customer_id" + where, args)
+  clamp_page(l)
+  order := "o.id desc"
+  switch l.sort {
+  case "oldest": order = "o.id"
+  case "total": order = "o.total_cents desc, o.id desc"
+  }
+  args = append(args, PER_PAGE)
+  args = append(args, (l.page - 1) * PER_PAGE)
+  return orders.orders_of(db.query("select " + orders.order_cols() + " from orders o join customers cu on cu.id = o.customer_id" + where + " order by " + order + " limit $" + str(len(args) - 1) + " offset $" + str(len(args)), args))
+}
+
+# ---------------------------------------------------------------- customers
+
+const CUSTOMER_COLS = "cu.id, cu.name, cu.email, cu.phone, cu.role, cu.blocked, to_char(cu.created_at, 'DD/MM/YYYY') as created, (select count(*) from orders o where o.customer_id = cu.id) as n, (select coalesce(sum(total_cents), 0) from orders o where o.customer_id = cu.id and o.status <> 'canceled') as spent"
+
+fn customer_of(r: *pg.Rows) -> model.CustomerRow {
+  return model.CustomerRow{id: r.get_int("id"), name: r.get_str("name"), email: r.get_str("email"), phone: r.get_str("phone"), role: r.get_str("role"), blocked: r.get_bool("blocked"), orders: r.get_int("n"), spent: r.get_int("spent"), created: r.get_str("created")}
+}
+
+export fn customer_list(l: *model.Listing) -> []model.CustomerRow {
+  conds := []str{"cu.role = 'customer'"}
+  args := []any{}
+  q := strings.trim_space(l.q)
+  if q != "" {
+    args = append(args, db.like(q))
+    conds = append(conds, "(f_unaccent(cu.name) ilike f_unaccent($1) or cu.email ilike $1 or cu.phone ilike $1)")
+  }
+  if l.filter == "blocked" { conds = append(conds, "cu.blocked") }
+  if l.filter == "buyers" { conds = append(conds, "exists (select 1 from orders o where o.customer_id = cu.id)") }
+  where := " where " + strings.join(conds, " and ")
+  l.total = db.scalar_int("select count(*) as n from customers cu" + where, args)
+  clamp_page(l)
+  order := "cu.id desc"
+  switch l.sort {
+  case "name": order = "cu.name, cu.id"
+  case "spent": order = "spent desc, cu.id"
+  case "orders": order = "n desc, cu.id"
+  }
+  args = append(args, PER_PAGE)
+  args = append(args, (l.page - 1) * PER_PAGE)
+  rows := db.query("select " + CUSTOMER_COLS + " from customers cu" + where + " order by " + order + " limit $" + str(len(args) - 1) + " offset $" + str(len(args)), args)
+  out := []model.CustomerRow{}
+  while rows.next() { out = append(out, customer_of(rows)) }
+  return out
+}
+
+export fn customer(id: int) -> *model.CustomerRow {
+  r := db.row("select " + CUSTOMER_COLS + " from customers cu where cu.id = $1", []any{id})
+  if r == nil { return nil }
+  c := customer_of(r)
+  return &c
+}
+
+export fn staff() -> []model.CustomerRow {
+  rows := db.query("select " + CUSTOMER_COLS + " from customers cu where cu.role <> 'customer' order by cu.role, cu.name", []any{})
+  out := []model.CustomerRow{}
+  while rows.next() { out = append(out, customer_of(rows)) }
+  return out
+}
+
+# ---------------------------------------------------------------- coupons
+
+export fn coupons() -> []model.Coupon {
+  rows := db.query("select code, kind, value, min_cents, coalesce(max_uses, 0) as max_uses, used, coalesce(to_char(expires_at at time zone 'America/Recife', 'YYYY-MM-DD'), '') as expires, active from coupons order by created_at desc", []any{})
+  out := []model.Coupon{}
+  while rows.next() { out = append(out, model.Coupon{code: rows.get_str("code"), kind: rows.get_str("kind"), value: rows.get_int("value"), min: rows.get_int("min_cents"), max_uses: rows.get_int("max_uses"), used: rows.get_int("used"), expires: rows.get_str("expires"), active: rows.get_bool("active")}) }
+  return out
+}
+
+export fn save_coupon(f: map[str]str, creating: bool) -> (map[str]str, str) {
+  errs := map[str]str{}
+  code := strings.to_upper(strings.trim_space(f["code"]))
+  if len(code) < 3 || db.slugify(code) != strings.to_lower(code) { errs["code"] = "Use letras e números, sem espaços (ex.: BEMVINDO10)." }
+  if creating && db.row("select 1 from coupons where code = $1", []any{code}) != nil { errs["code"] = "Este código já existe." }
+  kind := f["kind"]
+  if kind != "percent" && kind != "fixed" { kind = "percent" }
+  value := 0
+  if kind == "percent" {
+    value = catalog.atoi_or(strings.trim_space(f["value"]), 0)
+    if value < 1 || value > 90 { errs["value"] = "Um percentual entre 1 e 90." }
+  } else {
+    value = model.parse_reais(f["value"])
+    if value <= 0 { errs["value"] = "Informe o valor, como 15,00." }
+  }
+  min_c := 0
+  if strings.trim_space(f["min"]) != "" {
+    min_c = model.parse_reais(f["min"])
+    if min_c < 0 { errs["min"] = "Informe o valor mínimo, como 100,00." }
+  }
+  max_uses := catalog.atoi_or(strings.trim_space(f["max_uses"]), 0)
+  expires := strings.trim_space(f["expires"])
+  if expires != "" && (len(expires) != 10 || expires[4:5] != "-" || expires[7:8] != "-") { errs["expires"] = "Use uma data válida." }
+  if len(errs) > 0 { return errs, code }
+  let exp: any = nil
+  if expires != "" { exp = expires + " 23:59:59 America/Recife" }
+  if creating {
+    db.exec("insert into coupons (code, kind, value, min_cents, max_uses, expires_at, active) values ($1, $2, $3, $4, $5, $6::timestamptz, $7)", []any{code, kind, value, min_c, nullable(max_uses), exp, f["active"] != ""})
+  } else {
+    db.exec("update coupons set kind = $2, value = $3, min_cents = $4, max_uses = $5, expires_at = $6::timestamptz, active = $7 where code = $1", []any{code, kind, value, min_c, nullable(max_uses), exp, f["active"] != ""})
+  }
+  return errs, code
+}
+
+# ---------------------------------------------------------------- settings
+
+export fn rates() -> []model.Rate {
+  rows := db.query("select id, name, cep_from, cep_to, price_cents, days from shipping_rates order by cep_from", []any{})
+  out := []model.Rate{}
+  while rows.next() { out = append(out, model.Rate{id: rows.get_int("id"), name: rows.get_str("name"), cep_from: pad8(rows.get_int("cep_from")), cep_to: pad8(rows.get_int("cep_to")), price: rows.get_int("price_cents"), days: rows.get_int("days")}) }
+  return out
+}
+
+fn pad8(n: int) -> str {
+  s := str(n)
+  while len(s) < 8 { s = "0" + s }
+  return model.cep(s)
+}
+
+export fn settings() -> map[str]str {
+  rows := db.query("select key, value from settings", []any{})
+  out := map[str]str{}
+  while rows.next() { out[rows.get_str("key")] = rows.get_str("value") }
+  return out
+}
+
+export fn audit(l: *model.Listing) -> []model.AuditEntry {
+  args := []any{}
+  where := ""
+  if strings.trim_space(l.q) != "" {
+    args = append(args, db.like(strings.trim_space(l.q)))
+    where = " where a.action ilike $1 or a.entity ilike $1 or a.detail ilike $1 or c.name ilike $1"
+  }
+  l.total = db.scalar_int("select count(*) as n from audit_log a left join customers c on c.id = a.actor_id" + where, args)
+  clamp_page(l)
+  args = append(args, PER_PAGE)
+  args = append(args, (l.page - 1) * PER_PAGE)
+  rows := db.query("select coalesce(c.name, 'sistema') as actor, a.action, a.entity, a.entity_id, a.detail, to_char(a.created_at at time zone 'America/Recife', 'DD/MM/YYYY HH24:MI') as at from audit_log a left join customers c on c.id = a.actor_id" + where + " order by a.id desc limit $" + str(len(args) - 1) + " offset $" + str(len(args)), args)
+  out := []model.AuditEntry{}
+  while rows.next() { out = append(out, model.AuditEntry{actor: rows.get_str("actor"), action: rows.get_str("action"), entity: rows.get_str("entity"), entity_id: rows.get_str("entity_id"), detail: rows.get_str("detail"), at: rows.get_str("at")}) }
+  return out
+}

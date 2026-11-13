@@ -1,0 +1,163 @@
+# Passwords, sessions and the signed-in user.
+#
+# Passwords: PBKDF2-HMAC-SHA256 with a random salt, stored as "pbkdf2$<iterations>$<salt>$<key>"
+# (hex), so the cost can grow later. Sessions: the cookie "sid" carries 32 random bytes; the table
+# keeps their SHA-256. A session exists only once it is needed (a cart, a sign-in, a message).
+import "github.com/aecdanjundex/web"
+import "std/crypto"
+import "std/hex"
+import "std/strings"
+import "std/strconv"
+import "./model"
+import "./back/db"
+
+const ITERATIONS = 60000
+const COOKIE = "sid"
+const DAYS = 30
+
+export fn hash_password(password: str) -> str {
+  salt, err := crypto.random_bytes(16)
+  if err != nil { panic("random: " + err.Error()) }
+  key := crypto.pbkdf2_sha256(password, salt, ITERATIONS, 32)
+  return "pbkdf2$" + str(ITERATIONS) + "$" + hex.encode(salt) + "$" + hex.encode(key)
+}
+
+export fn check_password(password: str, stored: str) -> bool {
+  parts := strings.split(stored, "$")
+  if len(parts) != 4 || parts[0] != "pbkdf2" { return false }
+  n, err := strconv.atoi(parts[1])
+  if err != nil || n < 1 { return false }
+  salt, serr := hex.decode(parts[2])
+  if serr != nil { return false }
+  want, werr := hex.decode(parts[3])
+  if werr != nil { return false }
+  return crypto.constant_time_eq(crypto.pbkdf2_sha256(password, salt, n, len(want)), want)
+}
+
+export fn token() -> str {
+  b, err := crypto.random_bytes(32)
+  if err != nil { panic("random: " + err.Error()) }
+  return hex.encode(b)
+}
+
+fn token_hash(t: str) -> str { return crypto.sha256_hex(t) }
+
+# what a request knows about its visitor
+export struct Session {
+  hash: str               # "" no session yet
+  user: *model.User
+  cart_id: int
+  flash: str
+}
+
+export fn cookie(c: *web.Context, name: str) -> str {
+  for _, part := range strings.split(c.header("cookie"), ";") {
+    kv := strings.trim_space(part)
+    if strings.has_prefix(kv, name + "=") { return kv[len(name) + 1:] }
+  }
+  return ""
+}
+
+# the session of the request (kept in the context as "session"); the flash message is read once
+export fn session(c: *web.Context) -> *Session {
+  v, ok := c.get("session")
+  if ok { return v.(*Session) }
+  s := &Session{}
+  t := cookie(c, COOKIE)
+  if len(t) == 64 {
+    h := token_hash(t)
+    r := db.row("select s.cart_id, s.flash, c.id as uid, c.name, c.email, c.role, c.blocked from sessions s left join customers c on c.id = s.customer_id where s.token_hash = $1 and s.expires_at > now()", []any{h})
+    if r != nil {
+      s.hash = h
+      if !r.is_null("cart_id") { s.cart_id = r.get_int("cart_id") }
+      s.flash = r.get_str("flash")
+      if !r.is_null("uid") && !r.get_bool("blocked") {
+        s.user = &model.User{id: r.get_int("uid"), name: r.get_str("name"), email: r.get_str("email"), role: r.get_str("role")}
+      }
+      if s.flash != "" { db.exec("update sessions set flash = '' where token_hash = $1", []any{h}) }
+    }
+  }
+  c.set("session", s)
+  return s
+}
+
+# the session, created (with its cookie) when the visitor had none
+export fn ensure(c: *web.Context) -> *Session {
+  s := session(c)
+  if s.hash != "" { return s }
+  start(c, s, 0)
+  return s
+}
+
+fn start(c: *web.Context, s: *Session, customer_id: int) {
+  t := token()
+  s.hash = token_hash(t)
+  let cust_v: any = nil
+  if customer_id > 0 { cust_v = customer_id }
+  let cart_v: any = nil
+  if s.cart_id > 0 { cart_v = s.cart_id }
+  db.exec("insert into sessions (token_hash, customer_id, cart_id, expires_at) values ($1, $2, $3, now() + interval '30 days')", []any{s.hash, cust_v, cart_v})
+  c.set_header("Set-Cookie", COOKIE + "=" + t + "; Path=/; Max-Age=" + str(DAYS * 86400) + "; HttpOnly; SameSite=Lax")
+}
+
+# a message for the next page
+export fn flash(c: *web.Context, msg: str) {
+  s := ensure(c)
+  db.exec("update sessions set flash = $2 where token_hash = $1", []any{s.hash, msg})
+}
+
+# signs in: a new session (a new token, so one known before signing in is worthless) that keeps
+# the visitor's cart, merged into the customer's own
+export fn sign_in(c: *web.Context, user: *model.User) {
+  s := session(c)
+  old_cart := s.cart_id
+  if s.hash != "" { db.exec("delete from sessions where token_hash = $1", []any{s.hash}) }
+  mine := cart_of_customer(user.id)
+  if old_cart > 0 && old_cart != mine {
+    db.exec("insert into cart_items (cart_id, product_id, qty) select $1, product_id, qty from cart_items where cart_id = $2 on conflict (cart_id, product_id) do update set qty = greatest(cart_items.qty, excluded.qty)", []any{mine, old_cart})
+    db.exec("delete from carts where id = $1 and customer_id is null", []any{old_cart})
+  }
+  s.cart_id = mine
+  s.user = user
+  start(c, s, user.id)
+}
+
+export fn sign_out(c: *web.Context) {
+  s := session(c)
+  if s.hash != "" { db.exec("delete from sessions where token_hash = $1", []any{s.hash}) }
+  s.hash = ""
+  s.user = nil
+  s.cart_id = 0
+  c.set_header("Set-Cookie", COOKIE + "=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+}
+
+# the customer's cart (created the first time)
+export fn cart_of_customer(id: int) -> int {
+  r := db.row("insert into carts (customer_id) values ($1) on conflict (customer_id) do update set updated_at = now() returning id", []any{id})
+  return r.get_int("id")
+}
+
+# the visitor's cart, created when create is true; 0 when there is none
+export fn cart(c: *web.Context, create: bool) -> int {
+  s := session(c)
+  if s.cart_id > 0 { return s.cart_id }
+  if !create { return 0 }
+  s = ensure(c)
+  id := 0
+  if s.user != nil {
+    id = cart_of_customer(s.user.id)
+  } else {
+    id = db.row("insert into carts default values returning id", []any{}).get_int("id")
+  }
+  db.exec("update sessions set cart_id = $2 where token_hash = $1", []any{s.hash, id})
+  s.cart_id = id
+  return id
+}
+
+# writes to the audit log
+export fn audit(c: *web.Context, action: str, entity: str, id: str, detail: str) {
+  s := session(c)
+  let actor: any = nil
+  if s.user != nil { actor = s.user.id }
+  db.exec("insert into audit_log (actor_id, action, entity, entity_id, detail) values ($1, $2, $3, $4, $5)", []any{actor, action, entity, id, detail})
+}

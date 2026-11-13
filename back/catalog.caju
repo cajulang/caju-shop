@@ -1,0 +1,311 @@
+# The catalog: categories, products, the home's sections and the search with its filters.
+import "../caju-pg/pg"
+import "std/strings"
+import "std/strconv"
+import "std/os"
+import "./model"
+import "./back/db"
+
+export const PER_PAGE = 24
+
+const PRODUCT_COLS = "p.id, p.category_id, c.name as category, c.slug as category_slug, p.name, p.slug, p.description, p.price_cents, coalesce(p.sale_cents, 0) as sale_cents, p.stock, p.active, p.hue, to_char(p.created_at, 'DD/MM/YYYY') as created"
+
+export fn product_cols() -> str { return PRODUCT_COLS }
+
+export fn product_of(r: *pg.Rows) -> model.Product {
+  return model.Product{
+    id: r.get_int("id"), category_id: r.get_int("category_id"), category: r.get_str("category"),
+    category_slug: r.get_str("category_slug"), name: r.get_str("name"), slug: r.get_str("slug"),
+    description: r.get_str("description"), price: r.get_int("price_cents"), sale: r.get_int("sale_cents"),
+    stock: r.get_int("stock"), active: r.get_bool("active"), hue: r.get_int("hue"), created: r.get_str("created"),
+  }
+}
+
+export fn products_of(rows: *pg.Rows) -> []model.Product {
+  out := []model.Product{}
+  while rows.next() { out = append(out, product_of(rows)) }
+  return out
+}
+
+# every category, flat, in tree order, with its count of active products
+export fn categories_flat() -> []model.Category {
+  rows := db.query("select c.id, coalesce(c.parent_id, 0) as parent_id, c.name, c.slug, c.description, c.position, (select count(*) from products p join categories pc on pc.id = p.category_id where p.active and (pc.id = c.id or pc.parent_id = c.id)) as n, coalesce(par.position, c.position) as top_pos, coalesce(par.id, c.id) as top_id from categories c left join categories par on par.id = c.parent_id order by top_pos, top_id, c.parent_id nulls first, c.position, c.name", []any{})
+  out := []model.Category{}
+  while rows.next() {
+    d := 0
+    if rows.get_int("parent_id") > 0 { d = 1 }
+    out = append(out, model.Category{id: rows.get_int("id"), parent_id: rows.get_int("parent_id"), name: rows.get_str("name"), slug: rows.get_str("slug"), description: rows.get_str("description"), position: rows.get_int("position"), products: rows.get_int("n"), depth: d, children: []model.Category{}})
+  }
+  return out
+}
+
+# the top categories with their children (the menu); cached, the catalog's version decides
+let nav_cache: []model.Category = nil
+let nav_version: int = -1
+
+# the catalog's version, read at most once a second (the processes do not share memory: each
+# sees a change within a second)
+let version_at: int = 0
+let version_seen: int = -1
+
+export fn version() -> int {
+  now := os.nanotime()
+  if version_seen >= 0 && now - version_at < 1000000000 { return version_seen }
+  version_seen = db.scalar_int("select coalesce((select value::int from settings where key = 'catalog_version'), 0) as v", []any{})
+  version_at = now
+  return version_seen
+}
+
+# the catalog changed: the menu and the other caches are rebuilt
+export fn touch() {
+  db.exec("insert into settings (key, value) values ('catalog_version', '1') on conflict (key) do update set value = (settings.value::int + 1)::text", []any{})
+  version_seen = -1
+}
+
+export fn nav() -> []model.Category {
+  v := version()
+  if nav_cache != nil && v == nav_version { return nav_cache }
+  flat := categories_flat()
+  out := []model.Category{}
+  for _, c := range flat {
+    if c.parent_id == 0 {
+      out = append(out, c)
+    } else if len(out) > 0 {
+      out[len(out) - 1].children = append(out[len(out) - 1].children, c)
+    }
+  }
+  nav_cache = out
+  nav_version = v
+  return out
+}
+
+export fn category_by_slug(slug: str) -> *model.Category {
+  for _, top := range nav() {
+    if top.slug == slug {
+      c := top
+      return &c
+    }
+    for _, ch := range top.children {
+      if ch.slug == slug {
+        c := ch
+        return &c
+      }
+    }
+  }
+  return nil
+}
+
+export fn category_name(id: int) -> str {
+  for _, top := range nav() {
+    if top.id == id { return top.name }
+    for _, ch := range top.children {
+      if ch.id == id { return ch.name }
+    }
+  }
+  return ""
+}
+
+# the breadcrumbs of a category
+export fn crumbs(cat: *model.Category) -> []model.Crumb {
+  out := []model.Crumb{model.Crumb{name: "Início", href: "/"}}
+  if cat == nil { return out }
+  if cat.parent_id > 0 {
+    for _, top := range nav() {
+      if top.id == cat.parent_id { out = append(out, model.Crumb{name: top.name, href: "/categoria/" + top.slug}) }
+    }
+  }
+  return append(out, model.Crumb{name: cat.name, href: "/categoria/" + cat.slug})
+}
+
+export fn home() -> *model.HomeData {
+  data := &model.HomeData{sections: []model.Section{}, categories: nav()}
+  secs := db.query("select id, title, subtitle, position from sections where active order by position, id", []any{})
+  ids := []int{}
+  while secs.next() {
+    data.sections = append(data.sections, model.Section{id: secs.get_int("id"), title: secs.get_str("title"), subtitle: secs.get_str("subtitle"), position: secs.get_int("position"), active: true, products: []model.Product{}})
+    ids = append(ids, secs.get_int("id"))
+  }
+  if len(ids) == 0 { return data }
+  rows := db.query("select sp.section_id, " + PRODUCT_COLS + " from section_products sp join products p on p.id = sp.product_id join categories c on c.id = p.category_id where p.active and sp.section_id = any($1::bigint[]) order by sp.section_id, sp.position, p.id", []any{int_array(ids)})
+  while rows.next() {
+    sid := rows.get_int("section_id")
+    for i := 0; i < len(data.sections); i++ {
+      if data.sections[i].id == sid && len(data.sections[i].products) < 12 { data.sections[i].products = append(data.sections[i].products, product_of(rows)) }
+    }
+  }
+  return data
+}
+
+# a Postgres array literal of ints: {1,2,3}
+export fn int_array(ids: []int) -> str {
+  b := strings.Builder{}
+  b.write("{")
+  for i, id := range ids {
+    if i > 0 { b.write(",") }
+    b.write(str(id))
+  }
+  b.write("}")
+  return b.string()
+}
+
+export fn product_by_slug(slug: str, only_active: bool) -> *model.Product {
+  cond := ""
+  if only_active { cond = " and p.active" }
+  r := db.row("select " + PRODUCT_COLS + " from products p join categories c on c.id = p.category_id where p.slug = $1" + cond, []any{slug})
+  if r == nil { return nil }
+  p := product_of(r)
+  return &p
+}
+
+export fn product_by_id(id: int) -> *model.Product {
+  r := db.row("select " + PRODUCT_COLS + " from products p join categories c on c.id = p.category_id where p.id = $1", []any{id})
+  if r == nil { return nil }
+  p := product_of(r)
+  return &p
+}
+
+export fn product_page(slug: str) -> *model.ProductData {
+  p := product_by_slug(slug, true)
+  if p == nil { return nil }
+  cat := category_by_slug(p.category_slug)
+  cr := crumbs(cat)
+  related := products_of(db.query("select " + PRODUCT_COLS + " from products p join categories c on c.id = p.category_id where p.active and p.category_id = $1 and p.id <> $2 order by p.stock = 0, random() limit 4", []any{p.category_id, p.id}))
+  return &model.ProductData{product: *p, crumbs: cr, related: related}
+}
+
+# ---------------------------------------------------------------- search
+
+# the words of a query as a prefix tsquery: "doce leit" -> "doce:* & leit:*" (only letters and
+# digits go through, so the text cannot break the tsquery's syntax)
+export fn ts_query(q: str) -> str {
+  q = strings.to_lower(db.fold(q))
+  words := []str{}
+  cur := strings.Builder{}
+  for i := 0; i <= len(q); i++ {
+    ch := 32
+    if i < len(q) { ch = int(q[i]) }
+    if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') {
+      cur.write_byte(ch)
+    } else if cur.len() > 0 {
+      words = append(words, cur.string() + ":*")
+      cur.reset()
+    }
+  }
+  return strings.join(words, " & ")
+}
+
+export struct Filters {
+  q: str
+  category: str
+  min: str
+  max: str
+  sale: bool
+  stock: bool
+  sort: str
+  page: int
+}
+
+# builds the WHERE of a search: the conditions and their arguments (the category's own condition
+# apart, so the facets can count every category)
+struct Where {
+  conds: []str
+  args: []any
+}
+
+fn (w: *Where) add(cond: str, arg: any) {
+  w.args = append(w.args, arg)
+  w.conds = append(w.conds, strings.replace_all(cond, "$?", "$" + str(len(w.args))))
+}
+
+fn (w: *Where) sql() -> str {
+  if len(w.conds) == 0 { return "" }
+  return " and " + strings.join(w.conds, " and ")
+}
+
+export fn search(f: Filters, base: str) -> *model.Search {
+  s := &model.Search{q: f.q, category: f.category, min: f.min, max: f.max, sale: f.sale, stock: f.stock, sort: f.sort, page: f.page, base: base, products: []model.Product{}, facets: []model.Facet{}, subcategories: []model.Category{}}
+  if s.sort == "" { s.sort = "relevance" }
+  if s.page < 1 { s.page = 1 }
+  w := &Where{conds: []str{}, args: []any{}}
+  tsq := ts_query(f.q)
+  if tsq != "" {
+    # the words, or a name that resembles the text (typos: "cocda")
+    w.args = append(w.args, tsq)
+    n := len(w.args)
+    w.args = append(w.args, strings.to_lower(f.q))
+    w.conds = append(w.conds, "(p.search @@ to_tsquery('portuguese', $" + str(n) + ") or word_similarity(f_unaccent($" + str(n + 1) + "), f_unaccent(lower(p.name))) > 0.45)")
+  }
+  lo := model.parse_reais(f.min)
+  if lo >= 0 { w.add("coalesce(p.sale_cents, p.price_cents) >= $?", lo) }
+  hi := model.parse_reais(f.max)
+  if hi >= 0 { w.add("coalesce(p.sale_cents, p.price_cents) <= $?", hi) }
+  if f.sale { w.conds = append(w.conds, "p.sale_cents is not null and p.sale_cents < p.price_cents") }
+  if f.stock { w.conds = append(w.conds, "p.stock > 0") }
+
+  # the facets: the matches by top category, without the category filter
+  facet_rows := db.query("select coalesce(pc.parent_id, pc.id) as top, count(*) as n from products p join categories pc on pc.id = p.category_id where p.active" + w.sql() + " group by 1", w.args)
+  counts := map[int]int{}
+  while facet_rows.next() { counts[facet_rows.get_int("top")] = facet_rows.get_int("n") }
+  for _, top := range nav() {
+    if counts[top.id] > 0 { s.facets = append(s.facets, model.Facet{id: top.id, name: top.name, slug: top.slug, count: counts[top.id]}) }
+  }
+
+  cat := category_by_slug(f.category)
+  if cat != nil {
+    w.add("(c.id = $? or c.parent_id = $?)", cat.id)
+    if cat.parent_id == 0 {
+      for _, top := range nav() {
+        if top.id == cat.id { s.subcategories = top.children }
+      }
+    } else {
+      for _, top := range nav() {
+        if top.id == cat.parent_id { s.subcategories = top.children }
+      }
+    }
+  }
+  s.crumbs = crumbs(cat)
+
+  s.total = db.scalar_int("select count(*) as n from products p join categories c on c.id = p.category_id where p.active" + w.sql(), w.args)
+  s.pages = (s.total + PER_PAGE - 1) / PER_PAGE
+  if s.pages < 1 { s.pages = 1 }
+  if s.page > s.pages { s.page = s.pages }
+
+  order := "p.stock = 0, (p.id * 7919) % 1009, p.id"
+  switch s.sort {
+  case "price-asc": order = "coalesce(p.sale_cents, p.price_cents), p.id"
+  case "price-desc": order = "coalesce(p.sale_cents, p.price_cents) desc, p.id"
+  case "newest": order = "p.created_at desc, p.id desc"
+  case "name": order = "p.name, p.id"
+  default:
+    # the names with the very words typed first, then the stems' rank, then the closest spelling
+    if tsq != "" { order = "strpos(f_unaccent(lower(p.name)), f_unaccent($2)) = 0, p.stock = 0, ts_rank(p.search, to_tsquery('portuguese', $1)) desc, word_similarity(f_unaccent($2), f_unaccent(lower(p.name))) desc, p.id" }
+  }
+  args := w.args
+  args = append(args, PER_PAGE)
+  args = append(args, (s.page - 1) * PER_PAGE)
+  n := len(args)
+  s.products = products_of(db.query("select " + PRODUCT_COLS + " from products p join categories c on c.id = p.category_id where p.active" + w.sql() + " order by " + order + " limit $" + str(n - 1) + " offset $" + str(n), args))
+
+  if cat != nil {
+    s.heading = cat.name
+    s.intro = cat.description
+  } else if f.q != "" {
+    s.heading = "Resultados para “" + f.q + "”"
+  } else {
+    s.heading = "Todos os produtos"
+  }
+  return s
+}
+
+# names for the search box's suggestions
+export fn suggest(q: str) -> []model.Product {
+  tsq := ts_query(q)
+  if tsq == "" { return []model.Product{} }
+  return products_of(db.query("select " + PRODUCT_COLS + " from products p join categories c on c.id = p.category_id where p.active and (p.search @@ to_tsquery('portuguese', $1) or word_similarity(f_unaccent($2), f_unaccent(lower(p.name))) > 0.45) order by strpos(f_unaccent(lower(p.name)), f_unaccent($2)) = 0, ts_rank(p.search, to_tsquery('portuguese', $1)) desc, word_similarity(f_unaccent($2), f_unaccent(lower(p.name))) desc limit 6", []any{tsq, strings.to_lower(q)}))
+}
+
+export fn atoi_or(s: str, def: int) -> int {
+  n, err := strconv.atoi(s)
+  if err != nil { return def }
+  return n
+}

@@ -1,0 +1,299 @@
+# The frames of the pages: the store's (header with the search, the departments' menu, the
+# footer) and the panel's (a sidebar with its sections).
+import ui "../caju-ui/ui"
+import style "../caju-style/style"
+import "std/json"
+import "std/strings"
+import "./model"
+import "./kit"
+
+# ---------------------------------------------------------------- the search box
+
+let search_form = style.def("search-form", "relative flex w-full items-center")
+let search_input = style.def("search-input", "h-11 w-full rounded-full border border-input bg-card pr-12 pl-4 text-[15px] placeholder:text-muted-foreground/80 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/15 focus-visible:outline-none")
+let search_button = style.def("search-button", "absolute top-1 right-1 inline-flex size-9 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground hover:bg-primary-hover")
+let suggest_box = style.def("suggest-box", "absolute top-[calc(100%+6px)] right-0 left-0 z-40 overflow-hidden rounded-xl border bg-card shadow-[0_12px_32px_rgb(42_29_21/0.16)]")
+let suggest_item = style.def("suggest-item", "flex items-center gap-3 px-3 py-2 text-sm hover:bg-muted")
+let suggest_img = style.def("suggest-img", "size-10 shrink-0 rounded-md")
+let suggest_name = style.def("suggest-name", "flex-1 font-medium")
+let suggest_all = style.def("suggest-all", "block border-t px-3 py-2.5 text-sm font-semibold text-primary hover:bg-muted")
+
+struct Suggestion {
+  id: int
+  slug: str
+  name: str
+  price: int
+  hue: int
+}
+
+struct SearchBoxProps {
+  q: str
+}
+
+# suggestions while typing: 250 ms after the last key, the server's /api/sugestoes
+fn SearchBox(p: SearchBoxProps) -> *ui.Node {
+  q := ui.use_str(p.q)
+  items := ui.use_state(nil)
+  timer := ui.use_ref(0)
+  seq := ui.use_ref(0)
+  ask := fn(text: str) {
+    if timer.current.(int) != 0 { ui.clear_timer(timer.current.(int)) }
+    if len(strings.trim_space(text)) < 2 {
+      items.set(nil)
+      return
+    }
+    seq.current = seq.current.(int) + 1
+    mine := seq.current.(int)
+    timer.current = ui.set_timeout(250, fn() {
+      timer.current = 0
+      kit.api("GET", "/api/sugestoes?q=" + model.esc(text), "", fn(code: int, body: str) {
+        if code != 200 || mine != seq.current.(int) { return }
+        list := []Suggestion{}
+        json.unmarshal(body, &list)
+        items.set(list)
+      })
+    })
+  }
+  box := ui.empty()
+  if items.v != nil {
+    list := items.v.([]Suggestion)
+    rows := []*ui.Node{}
+    for _, s := range list {
+      rows = append(rows, (
+        <a key={s.id} class={suggest_item} href={"/produto/" + s.slug}>
+          <img class={suggest_img} src={kit.image_url(s.id, s.hue)} alt="" />
+          <span class={suggest_name}>{s.name}</span>
+          <span class={kit.muted_text}>{model.money(s.price)}</span>
+        </a>
+      ))
+    }
+    if len(list) == 0 { rows = append(rows, <div class={suggest_item}>Nada encontrado para “{q.v}”.</div>) }
+    box = (
+      <div class={suggest_box} role="listbox">
+        {rows}
+        <a class={suggest_all} href={"/busca?q=" + model.esc(q.v)}>Ver todos os resultados</a>
+      </div>
+    )
+  }
+  return (
+    <form class={search_form} method="get" action="/busca" role="search">
+      <input class={search_input} type="search" name="q" value={q.v} placeholder="Buscar cocada, cachaça, queijo coalho…" autocomplete="off" aria-label="Buscar produtos"
+        onInput={fn(e: *ui.Event) {
+          q.set(e.value)
+          ask(e.value)
+        }}
+        onKeyDown={fn(e: *ui.Event) { if e.key == "Escape" { items.set(nil) } }} />
+      <button class={search_button} type="submit" aria-label="Buscar">{kit.icon_search(18)}</button>
+      {box}
+    </form>
+  )
+}
+
+# ---------------------------------------------------------------- the store's frame
+
+let header_bar = style.def("header-bar", "sticky top-0 z-30 border-b bg-background/95 backdrop-blur-sm")
+let header_row = style.def("header-row", "@page-width flex flex-wrap items-center gap-x-6 gap-y-3 py-3 md:flex-nowrap")
+let brand = style.def("brand", "flex items-center gap-2.5 font-serif text-xl font-bold whitespace-nowrap text-foreground")
+let brand_sub = style.def("brand-sub", "hidden text-[11px] font-sans font-semibold tracking-[0.18em] text-accent uppercase sm:block")
+let search_slot = style.def("search-slot", "order-last w-full md:order-none md:max-w-xl md:flex-1")
+let header_actions = style.def("header-actions", "ml-auto flex items-center gap-1")
+let header_link = style.def("header-link", "relative inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-semibold hover:bg-muted")
+let cart_count = style.def("cart-count", "absolute -top-0.5 right-0 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1 text-[11px] font-bold text-primary-foreground tabular-nums")
+let hide_small = style.def("hide-small", "hidden sm:inline")
+let nav_bar = style.def("nav-bar", "border-t")
+let nav_row = style.def("nav-row", "@page-width flex gap-1 overflow-x-auto py-1.5 [scrollbar-width:none]")
+let nav_link = style.def("nav-link", "inline-flex h-9 items-center rounded-lg px-3 text-sm font-semibold whitespace-nowrap text-foreground/85 hover:bg-muted hover:text-foreground")
+let nav_link_on = style.def("nav-link-on", "@nav-link bg-muted text-primary")
+let main_area = style.def("main-area", "flex-1 py-6 sm:py-8")
+let footer_bar = style.def("footer-bar", "mt-12 border-t bg-ink text-ink-foreground")
+let footer_grid = style.def("footer-grid", "@page-width grid gap-8 py-10 text-sm sm:grid-cols-3 [&_a]:text-ink-foreground/75 [&_a:hover]:text-ink-foreground")
+let footer_title = style.def("footer-title", "mb-3 font-serif text-lg font-bold text-ink-foreground")
+let footer_list = style.def("footer-list", "flex flex-col gap-1.5")
+let footer_note = style.def("footer-note", "@page-width border-t border-white/10 py-4 text-xs text-ink-foreground/60")
+let flash_bar = style.def("flash-bar", "@page-width pt-4")
+let toast_box = style.def("toast-box", "fixed right-4 bottom-4 z-50 flex max-w-sm items-center gap-3 rounded-xl px-4 py-3 text-sm font-medium shadow-[0_12px_32px_rgb(0_0_0/0.25)] animate-in fade-in slide-in-from-bottom-4")
+let toast_ok = style.def("toast-ok", "@toast-box bg-ink text-ink-foreground")
+let toast_error = style.def("toast-error", "@toast-box bg-danger text-white")
+let skip_link = style.def("skip-link", "sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:rounded-lg focus:bg-card focus:px-4 focus:py-2")
+
+export struct StoreLayoutProps {
+  page: model.Page
+  children: []*ui.Node
+}
+
+fn toast(sh: *kit.Shell) -> *ui.Node {
+  if sh.toast.v == "" { return ui.empty() }
+  cls := toast_ok
+  if sh.tone.v == "error" { cls = toast_error }
+  return <div class={cls} role="status" aria-live="polite">{ui.when(sh.tone.v != "error", kit.icon_check(18))}{sh.toast.v}</div>
+}
+
+# the message of the last action; one that starts with "!" is an error
+export fn flash(msg: str) -> *ui.Node {
+  if msg == "" { return ui.empty() }
+  if msg[0:1] == "!" { return <div class={flash_bar}><div class={kit.alert_error} role="alert">{msg[1:]}</div></div> }
+  return <div class={flash_bar}><div class={kit.alert_ok} role="status">{msg}</div></div>
+}
+
+export fn StoreLayout(p: StoreLayoutProps) -> *ui.Node {
+  sh := kit.shell()
+  pg := p.page
+  q := ""
+  current := ""
+  if pg.search != nil {
+    q = pg.search.q
+    current = pg.search.category
+    for _, top := range pg.nav {
+      for _, ch := range top.children {
+        if ch.slug == current { current = top.slug }
+      }
+    }
+  }
+  if pg.product != nil {
+    for _, top := range pg.nav {
+      for _, ch := range top.children {
+        if ch.slug == pg.product.product.category_slug { current = top.slug }
+      }
+    }
+  }
+  navs := []*ui.Node{}
+  for _, top := range pg.nav {
+    cls := nav_link
+    if top.slug == current { cls = nav_link_on }
+    navs = append(navs, <a key={top.id} class={cls} href={"/categoria/" + top.slug}>{top.name}</a>)
+  }
+  navs = append(navs, <a class={nav_link} href="/busca?promo=1">Promoções</a>)
+  account := <a class={header_link} href="/entrar">{kit.icon_user(18)}<span class={hide_small}>Entrar</span></a>
+  admin := ui.empty()
+  if pg.user != nil {
+    first := strings.split(pg.user.name, " ")[0]
+    account = <a class={header_link} href="/conta">{kit.icon_user(18)}<span class={hide_small}>{first}</span></a>
+    if model.is_staff(pg.user) { admin = <a class={header_link} href="/admin">Painel</a> }
+  }
+  count := ui.empty()
+  if sh.count.v > 0 { count = <span class={cart_count} data-cart-count={sh.count.v}>{sh.count.v}</span> }
+  return (
+    <>
+      <a class={skip_link} href="#conteudo">Pular para o conteúdo</a>
+      <header class={header_bar}>
+        <div class={header_row}>
+          <a class={brand} href="/">{kit.logo()}<span>{pg.store}<span class={brand_sub}>empório nordestino</span></span></a>
+          <div class={search_slot}><SearchBox q={q} /></div>
+          <nav class={header_actions} aria-label="Sua conta">
+            {admin}
+            {account}
+            <a class={header_link} href="/carrinho" aria-label={"Carrinho, " + model.plural(sh.count.v, "item", "itens")}>{kit.icon_cart(20)}<span class={hide_small}>Carrinho</span>{count}</a>
+          </nav>
+        </div>
+        <div class={nav_bar}><nav class={nav_row} aria-label="Departamentos">{navs}</nav></div>
+      </header>
+      {flash(pg.flash)}
+      <main id="conteudo" class={main_area}>{p.children}</main>
+      <footer class={footer_bar}>
+        <div class={footer_grid}>
+          <div>
+            <div class={footer_title}>{pg.store}</div>
+            <p>Doces, bebidas, mercearia, queijos e artesanato do Nordeste, de pequenos produtores.</p>
+          </div>
+          <div>
+            <div class={footer_title}>Departamentos</div>
+            <div class={footer_list}>{footer_links(pg.nav)}</div>
+          </div>
+          <div>
+            <div class={footer_title}>Atendimento</div>
+            <div class={footer_list}>
+              <a href="/conta/pedidos">Meus pedidos</a>
+              <a href="/conta">Minha conta</a>
+              <a href="/carrinho">Carrinho</a>
+            </div>
+          </div>
+        </div>
+        <div class={footer_note}>Loja de demonstração feita em Caju: servidor, banco (PostgreSQL), páginas e WebAssembly. Nenhuma compra é cobrada.</div>
+      </footer>
+      {toast(sh)}
+    </>
+  )
+}
+
+fn footer_links(nav: []model.Category) -> []*ui.Node {
+  out := []*ui.Node{}
+  for _, c := range nav { out = append(out, <a key={c.id} href={"/categoria/" + c.slug}>{c.name}</a>) }
+  return out
+}
+
+# ---------------------------------------------------------------- the panel's frame
+
+let admin_flash_box = style.def("admin-flash", "mb-5")
+
+fn admin_flash(msg: str) -> *ui.Node {
+  if msg == "" { return ui.empty() }
+  if msg[0:1] == "!" { return <div class={admin_flash_box}><div class={kit.alert_error} role="alert">{msg[1:]}</div></div> }
+  return <div class={admin_flash_box}><div class={kit.alert_ok} role="status">{msg}</div></div>
+}
+
+let admin_shell = style.def("admin-shell", "flex min-h-dvh flex-1 flex-col bg-muted/40 lg:flex-row")
+let admin_side = style.def("admin-side", "border-b bg-ink text-ink-foreground lg:sticky lg:top-0 lg:h-dvh lg:w-60 lg:shrink-0 lg:border-r lg:border-b-0")
+let admin_brand = style.def("admin-brand", "flex items-center gap-2.5 px-5 py-4 font-serif text-lg font-bold")
+let admin_nav = style.def("admin-nav", "flex gap-1 overflow-x-auto px-3 pb-3 lg:flex-col lg:overflow-visible")
+let admin_link = style.def("admin-link", "flex h-9 items-center rounded-lg px-3 text-sm font-medium whitespace-nowrap text-ink-foreground/75 hover:bg-white/10 hover:text-ink-foreground")
+let admin_link_on = style.def("admin-link-on", "@admin-link bg-white/12 text-ink-foreground")
+let admin_group = style.def("admin-group", "hidden px-3 pt-4 pb-1 text-[11px] font-semibold tracking-[0.14em] text-ink-foreground/45 uppercase lg:block")
+let admin_main = style.def("admin-main", "min-w-0 flex-1 px-4 py-6 sm:px-8")
+let admin_top = style.def("admin-top", "mb-6 flex flex-wrap items-center justify-between gap-3")
+let admin_user = style.def("admin-user", "flex items-center gap-3 text-sm text-muted-foreground")
+
+export struct AdminLayoutProps {
+  page: model.Page
+  children: []*ui.Node
+}
+
+fn admin_item(href: str, label: str, on: bool) -> *ui.Node {
+  cls := admin_link
+  if on { cls = admin_link_on }
+  return <a class={cls} href={href}>{label}</a>
+}
+
+export fn AdminLayout(p: AdminLayoutProps) -> *ui.Node {
+  sh := kit.shell()
+  k := p.page.kind
+  on := fn(prefix: str) -> bool { return strings.has_prefix(k, prefix) }
+  editor := model.can_edit(p.page.user)
+  links := []*ui.Node{
+    admin_item("/admin", "Início", k == "admin-dashboard"),
+    <div class={admin_group}>Vendas</div>,
+    admin_item("/admin/pedidos", "Pedidos", on("admin-order")),
+    admin_item("/admin/clientes", "Clientes", on("admin-customer")),
+    <div class={admin_group}>Catálogo</div>,
+    admin_item("/admin/produtos", "Produtos", on("admin-product")),
+    admin_item("/admin/categorias", "Categorias", on("admin-categor")),
+    admin_item("/admin/secoes", "Seções da home", on("admin-section")),
+  }
+  if editor {
+    links = append(links, admin_item("/admin/cupons", "Cupons", on("admin-coupon")))
+    links = append(links, <div class={admin_group}>Loja</div>)
+    links = append(links, admin_item("/admin/configuracoes", "Configurações", on("admin-settings")))
+    links = append(links, admin_item("/admin/auditoria", "Auditoria", on("admin-audit")))
+  }
+  links = append(links, <div class={admin_group}>Atalhos</div>)
+  links = append(links, admin_item("/", "Ver a loja", false))
+  return (
+    <div class={admin_shell}>
+      <aside class={admin_side}>
+        <a class={admin_brand} href="/admin">{kit.logo()}Painel</a>
+        <nav class={admin_nav} aria-label="Painel">{links}</nav>
+      </aside>
+      <div class={admin_main}>
+        <div class={admin_top}>
+          <h1 class={kit.page_title}>{p.page.title}</h1>
+          <div class={admin_user}>
+            <span>{p.page.user.name} · {model.role_label(p.page.user.role)}</span>
+            <form method="post" action="/sair"><button class={kit.button_small}>Sair</button></form>
+          </div>
+        </div>
+        {admin_flash(p.page.flash)}
+        <main id="conteudo">{p.children}</main>
+      </div>
+      {toast(sh)}
+    </div>
+  )
+}
