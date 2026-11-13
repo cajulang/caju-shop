@@ -1,6 +1,6 @@
 # caju-shop
 
-A small online store written entirely in [Caju](https://github.com/aecdanjundex/cajulang):
+A small online store written entirely in [Caju](https://github.com/cajulang/cajulang):
 the server, the pages, the program that runs in the browser (WebAssembly), the CSS and the
 PostgreSQL client. **Empório Caju** sells sweets, drinks, groceries, cheeses and crafts from the
 Brazilian Northeast; its interface is in Portuguese.
@@ -9,10 +9,10 @@ It puts together everything built for Caju so far:
 
 | | |
 |---|---|
-| [ui](https://github.com/aecdanjundex/ui) | the components, rendered on the server and hydrated in the browser (WebAssembly in a worker) |
-| [web](https://github.com/aecdanjundex/web) | the routes, middlewares and forms |
-| [pg](https://github.com/aecdanjundex/pg) | PostgreSQL over its wire protocol, with a pool and transactions |
-| [caju style](https://github.com/aecdanjundex/caju-style) | the CSS: Tailwind's vocabulary compiled to one readable class per style, a sheet per page |
+| [ui](https://github.com/cajulang/ui) | the components, rendered on the server and hydrated in the browser (WebAssembly in a worker) |
+| [web](https://github.com/cajulang/web) | the routes, middlewares and forms |
+| [pg](https://github.com/cajulang/pg) | PostgreSQL over its wire protocol, with a pool and transactions |
+| [caju style](https://github.com/cajulang/caju-style) | the CSS: Tailwind's vocabulary compiled to one readable class per style, a sheet per page |
 
 ## What it does
 
@@ -79,9 +79,9 @@ function (`public/shop.js`), because the WebAssembly worker has no `fetch` of it
 
 ## Running it
 
-Needs `caju` (0.5.0), checkouts of [ui](https://github.com/aecdanjundex/ui) (with
-`build/caju-ui` built), [caju-style](https://github.com/aecdanjundex/caju-style) and
-[pg](https://github.com/aecdanjundex/pg) next to this one (`../caju-ui`, `../caju-style`,
+Needs `caju` (0.5.0), checkouts of [ui](https://github.com/cajulang/ui) (with
+`build/caju-ui` built), [caju-style](https://github.com/cajulang/caju-style) and
+[pg](https://github.com/cajulang/pg) next to this one (`../caju-ui`, `../caju-style`,
 `../caju-pg`), and a PostgreSQL 14 or later with the `unaccent` and `pg_trgm` extensions (the
 official image has them).
 

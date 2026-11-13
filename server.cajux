@@ -6,7 +6,7 @@
 import ui "../caju-ui/ui"
 import "../caju-ui/ssr"
 import "../caju-ui/gzip"
-import "github.com/aecdanjundex/web"
+import "github.com/cajulang/web"
 import "std/json"
 import "std/os"
 import "std/fs"

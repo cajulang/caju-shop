@@ -1,12 +1,12 @@
 # Written by `caju pkg`; do not edit. It pins the exact version, commit and hash of every
 # package the project uses, directly or not.
 version = 1
-requires = ["github.com/aecdanjundex/web@0.2.0"]
+requires = ["github.com/cajulang/web@0.2.1"]
 
 [[package]]
-name = "github.com/aecdanjundex/web"
-version = "0.2.0"
-source = "https://github.com/aecdanjundex/web"
-commit = "1e062909eb6555909e377fea0434f4b9c6706c0b"
-hash = "sha256:a593d06ba7f0f65d374e39ebd577256857b9259a28280b5624b848b63a48f3d3"
+name = "github.com/cajulang/web"
+version = "0.2.1"
+source = "https://github.com/cajulang/web"
+commit = "4a65f3efc2d3419ebca8407d12935187c4272502"
+hash = "sha256:d4761aa81c5e31b587d5d25d5b9cfc342163ec7af5bbbb4c84b4c21ab72e2aa0"
 dependencies = []

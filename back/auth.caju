@@ -3,7 +3,7 @@
 # Passwords: PBKDF2-HMAC-SHA256 with a random salt, stored as "pbkdf2$<iterations>$<salt>$<key>"
 # (hex), so the cost can grow later. Sessions: the cookie "sid" carries 32 random bytes; the table
 # keeps their SHA-256. A session exists only once it is needed (a cart, a sign-in, a message).
-import "github.com/aecdanjundex/web"
+import "github.com/cajulang/web"
 import "std/crypto"
 import "std/hex"
 import "std/strings"

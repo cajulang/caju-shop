@@ -1,9 +1,9 @@
 [package]
-name = "github.com/aecdanjundex/caju-shop"
+name = "github.com/cajulang/caju-shop"
 version = "0.1.0"
 description = "A small online store in Caju: PostgreSQL, a server and a WebAssembly front end, all in Caju"
 license = "MIT"
 authors = []
 
 [dependencies]
-"github.com/aecdanjundex/web" = "0.2.0"
+"github.com/cajulang/web" = "0.2.1"
