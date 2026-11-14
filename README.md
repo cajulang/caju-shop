@@ -79,7 +79,7 @@ function (`public/shop.js`), because the WebAssembly worker has no `fetch` of it
 
 ## Running it
 
-Needs `caju` (0.5.0), checkouts of [ui](https://github.com/cajulang/ui) (with
+Needs `caju` (0.6.0), checkouts of [ui](https://github.com/cajulang/ui) (with
 `build/caju-ui` built), [caju-style](https://github.com/cajulang/caju-style) and
 [pg](https://github.com/cajulang/pg) next to this one (`../caju-ui`, `../caju-style`,
 `../caju-pg`), and a PostgreSQL 14 or later with the `unaccent` and `pg_trgm` extensions (the
