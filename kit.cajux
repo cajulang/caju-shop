@@ -1,11 +1,12 @@
 # The pieces every page uses: the shell (the cart's count and the toasts, shared by context), the
 # calls to the server's API, the header with the search and its suggestions, the product card,
 # prices, form fields, breadcrumbs and pagination.
-import ui "../caju-ui/ui"
+import "github.com/cajulang/ui"
 import style "../caju-style/style"
 import "std/strings"
 import "std/strconv"
 import "std/json"
+import "github.com/cajulang/fetch"
 import "./model"
 
 # ---------------------------------------------------------------- the shell
@@ -28,38 +29,24 @@ export fn notify(s: *Shell, msg: str, tone: str) {
 
 # ---------------------------------------------------------------- talking to the server
 
-# a request to the server from the browser (page function "api" in public/shop.js): done gets the
-# HTTP status and the body
-export fn api(method: str, url: str, body: str, done: fn(int, str)) {
-  ui.call("api", method + "\n" + url + "\n" + body, fn(reply: str) {
-    i := strings.index(reply, "\n")
-    if i < 0 {
-      done(0, "")
-      return
-    }
-    code, _ := strconv.atoi(reply[0:i])
-    done(code, reply[i + 1:])
-  })
-}
+# the server's JSON API, for the browser's program (github.com/cajulang/fetch: the requests go
+# through the page's fetch). Bodies go as JSON
+export let api = fetch.create(&fetch.Config{base_url: "/api", headers: map[str]str{"Accept": "application/json"}, timeout_ms: 15000})
 
 # the "error" of a JSON reply, or a generic message
-export fn error_of(body: str) -> str {
-  v, err := json.parse(body)
-  if err == nil {
-    e := v.get_str("error", "")
-    if e != "" { return e }
+export fn error_of(r: *fetch.Response, err: error) -> str {
+  if r != nil {
+    v, perr := json.parse(r.body)
+    if perr == nil {
+      e := v.get_str("error", "")
+      if e != "" { return e }
+    }
   }
+  if fetch.is_timeout(err) { return "A loja demorou a responder. Tente de novo." }
   return "Não foi possível falar com a loja. Tente de novo."
 }
 
-# a form body: key=value&...
-export fn form(pairs: []str) -> str {
-  out := []str{}
-  for i := 0; i + 1 < len(pairs); i += 2 { out = append(out, pairs[i] + "=" + model.esc(pairs[i + 1])) }
-  return strings.join(out, "&")
-}
-
-export fn visit(url: str) { ui.call("go", url, fn(r: str) {}) }
+export fn visit(url: str) { ui.navigate(url) }
 
 # ---------------------------------------------------------------- styles shared by the pages
 
@@ -163,6 +150,10 @@ export fn image_url(id: int, hue: int) -> str { return "/img/p/" + str(id) + "-"
 let add_form = style.def("add-form", "flex items-center gap-2")
 let qty_input = style.def("qty-input", "h-10 w-16 rounded-lg border border-input bg-card px-2 text-center tabular-nums")
 
+struct CountReply {
+  count: int
+}
+
 export struct AddToCartProps {
   product: model.Product
   big: bool               # the product page's: with a quantity
@@ -180,15 +171,16 @@ export fn AddToCart(p: AddToCartProps) -> *ui.Node {
   submit := fn() {
     if busy.v { return }
     busy.set(true)
-    api("POST", "/api/carrinho", form([]str{"product_id", str(p.product.id), "qty", str(qty.v)}), fn(code: int, body: str) {
+    api.post("/carrinho", map[str]any{"product_id": p.product.id, "qty": qty.v}).done(fn(r: *fetch.Response, err: error) {
       busy.set(false)
-      if code == 200 {
-        v, _ := json.parse(body)
-        sh.count.set(v.get_int("count", sh.count.v))
-        notify(sh, p.product.name + " foi para o carrinho.", "ok")
-      } else {
-        notify(sh, error_of(body), "error")
+      if err != nil {
+        notify(sh, error_of(r, err), "error")
+        return
       }
+      reply := CountReply{count: sh.count.v}
+      r.json(&reply)
+      sh.count.set(reply.count)
+      notify(sh, p.product.name + " foi para o carrinho.", "ok")
     })
   }
   label := "Adicionar"

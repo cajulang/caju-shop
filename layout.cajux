@@ -1,6 +1,7 @@
 # The frames of the pages: the store's (header with the search, the departments' menu, the
 # footer) and the panel's (a sidebar with its sections).
-import ui "../caju-ui/ui"
+import "github.com/cajulang/ui"
+import "github.com/cajulang/fetch"
 import style "../caju-style/style"
 import "std/json"
 import "std/strings"
@@ -30,33 +31,39 @@ struct SearchBoxProps {
   q: str
 }
 
-# suggestions while typing: 250 ms after the last key, the server's /api/sugestoes
+# suggestions while typing: 250 ms after the last key, the server's /api/sugestoes (use_request
+# cancels the request of an older text, so a slow answer never replaces a newer one)
 fn SearchBox(p: SearchBoxProps) -> *ui.Node {
   q := ui.use_str(p.q)
-  items := ui.use_state(nil)
+  asked := ui.use_str("")          # the text the suggestions are for ("": none)
   timer := ui.use_ref(0)
-  seq := ui.use_ref(0)
   ask := fn(text: str) {
     if timer.current.(int) != 0 { ui.clear_timer(timer.current.(int)) }
     if len(strings.trim_space(text)) < 2 {
-      items.set(nil)
+      asked.set("")
       return
     }
-    seq.current = seq.current.(int) + 1
-    mine := seq.current.(int)
     timer.current = ui.set_timeout(250, fn() {
       timer.current = 0
-      kit.api("GET", "/api/sugestoes?q=" + model.esc(text), "", fn(code: int, body: str) {
-        if code != 200 || mine != seq.current.(int) { return }
-        list := []Suggestion{}
-        json.unmarshal(body, &list)
-        items.set(list)
-      })
+      asked.set(text)
     })
   }
+  url := ""
+  if asked.v != "" { url = "/sugestoes?q=" + model.esc(asked.v) }
+  found := fetch.use_request(kit.api, url)
+  # the last suggestions stay while the next ones load
+  shown := ui.use_ref(nil)
+  if url == "" {
+    shown.current = nil
+  } else if found.response != nil && found.error == nil {
+    list := []Suggestion{}
+    found.json(&list)
+    shown.current = list
+  }
+  items := shown.current
   box := ui.empty()
-  if items.v != nil {
-    list := items.v.([]Suggestion)
+  if items != nil {
+    list := items.([]Suggestion)
     rows := []*ui.Node{}
     for _, s := range list {
       rows = append(rows, (
@@ -82,7 +89,7 @@ fn SearchBox(p: SearchBoxProps) -> *ui.Node {
           q.set(e.value)
           ask(e.value)
         }}
-        onKeyDown={fn(e: *ui.Event) { if e.key == "Escape" { items.set(nil) } }} />
+        onKeyDown={fn(e: *ui.Event) { if e.key == "Escape" { asked.set("") } }} />
       <button class={search_button} type="submit" aria-label="Buscar">{kit.icon_search(18)}</button>
       {box}
     </form>

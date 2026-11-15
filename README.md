@@ -74,20 +74,22 @@ theme.caju        the palette; shop_css.caju writes the CSS
 The server renders each page with the same components the browser hydrates: `app.App` gets a
 `model.Page` (as JSON in the page for the browser). A visitor without a session gets the public
 pages from a cache, the same HTML for everyone, gzipped once and dropped when the catalog or the
-stock changes. The browser's program calls the server's JSON API (`/api/...`) through a page
-function (`public/shop.js`), because the WebAssembly worker has no `fetch` of its own.
+stock changes. The browser's program calls the server's JSON API (`/api/...`) with
+[fetch](https://github.com/cajulang/fetch) (the page's `fetch`, through ui's built-in page
+functions), sending JSON bodies.
 
 ## Running it
 
-Needs `caju` (0.6.0), checkouts of [ui](https://github.com/cajulang/ui) (with
-`build/caju-ui` built), [caju-style](https://github.com/cajulang/caju-style) and
-[pg](https://github.com/cajulang/pg) next to this one (`../caju-ui`, `../caju-style`,
-`../caju-pg`), and a PostgreSQL 14 or later with the `unaccent` and `pg_trgm` extensions (the
-official image has them).
+Needs `caju` (0.9.0), checkouts of [caju-style](https://github.com/cajulang/caju-style) and
+[pg](https://github.com/cajulang/pg) next to this one (`../caju-style`, `../caju-pg`), and a
+PostgreSQL 14 or later with the `unaccent` and `pg_trgm` extensions (the official image has
+them). [web](https://github.com/cajulang/web), [ui](https://github.com/cajulang/ui) and
+[fetch](https://github.com/cajulang/fetch) are packages (`caju.toml`); `tools/build.sh` builds the
+`caju-ui` command from the ui package the lock file pins (or takes `CAJU_UI=path`).
 
 ```sh
 kubectl apply -f deploy/postgres.yaml       # or any PostgreSQL: DATABASE_URL=postgres://...
-caju pkg install                            # web
+caju pkg install                            # web, ui and fetch
 tools/build.sh                              # the CSS, the program (wasm) and ./server
 ./server migrate && ./server seed           # the schema and the demonstration data
 ./server                                    # http://localhost:3800 (PORT, HOST, WORKERS)

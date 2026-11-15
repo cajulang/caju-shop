@@ -1,12 +1,28 @@
 # Written by `caju pkg`; do not edit. It pins the exact version, commit and hash of every
 # package the project uses, directly or not.
 version = 1
-requires = ["github.com/cajulang/web@0.2.1"]
+requires = ["github.com/cajulang/web@0.3.0", "github.com/cajulang/ui@0.4.1", "github.com/cajulang/fetch@0.1.1"]
+
+[[package]]
+name = "github.com/cajulang/fetch"
+version = "0.1.1"
+source = "https://github.com/cajulang/fetch"
+commit = "cfd1a398d185e225cae270050727972a23a7bf29"
+hash = "sha256:714fcf82fd1d9ec08e830d31215eeb235826f828af0fbab0acde2e7d0f6c75de"
+dependencies = ["github.com/cajulang/ui@0.3.0"]
+
+[[package]]
+name = "github.com/cajulang/ui"
+version = "0.4.1"
+source = "https://github.com/cajulang/ui"
+commit = "d49e2b9d1fb47f673632d40c4e4d2a1254d85057"
+hash = "sha256:2b8370c5418003ad97a230422c34224ed352da96c28afb344980bd7b6168cf50"
+dependencies = []
 
 [[package]]
 name = "github.com/cajulang/web"
-version = "0.2.1"
+version = "0.3.0"
 source = "https://github.com/cajulang/web"
-commit = "4a65f3efc2d3419ebca8407d12935187c4272502"
-hash = "sha256:d4761aa81c5e31b587d5d25d5b9cfc342163ec7af5bbbb4c84b4c21ab72e2aa0"
+commit = "0c89101271f5cc5c676c11b9d03eae874d98490a"
+hash = "sha256:14705f62b150dcc0a5874288ce98b4f3a8966a923b48168e3f84a4474f00d3fb"
 dependencies = []

@@ -1,6 +1,6 @@
 # The root of every page: the shell (the cart's count, the toasts) and the page the server chose
 # (model.Page.kind). The server renders it to HTML; the browser hydrates the same tree.
-import ui "../caju-ui/ui"
+import "github.com/cajulang/ui"
 import "./model"
 import "./kit"
 import "./layout"

@@ -1,5 +1,5 @@
 # Signing in and up, the customer's account (data and addresses) and their orders.
-import ui "../caju-ui/ui"
+import "github.com/cajulang/ui"
 import style "../caju-style/style"
 import "./model"
 import "./kit"

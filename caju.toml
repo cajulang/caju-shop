@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "A small online store in Caju: PostgreSQL, a server and a WebAssembly front end, all in Caju"
 license = "MIT"
 authors = []
-caju = "0.6.0"
+caju = "0.9.0"
 
 [dependencies]
-"github.com/cajulang/web" = "0.2.1"
+"github.com/cajulang/web" = "0.3.0"
+"github.com/cajulang/ui" = "0.4.1"
+"github.com/cajulang/fetch" = "0.1.1"

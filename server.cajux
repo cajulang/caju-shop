@@ -3,9 +3,9 @@
 #   ./server              serves (PORT, default 3800; DATABASE_URL; WORKERS processes)
 #   ./server migrate      applies sql/*.sql
 #   ./server seed         demonstration data      ./server reset   drops everything
-import ui "../caju-ui/ui"
-import "../caju-ui/ssr"
-import "../caju-ui/gzip"
+import "github.com/cajulang/ui"
+import "github.com/cajulang/ui/ssr"
+import "github.com/cajulang/ui/gzip"
 import "github.com/cajulang/web"
 import "std/json"
 import "std/os"
@@ -26,8 +26,24 @@ import "./back/seed"
 # ---------------------------------------------------------------- requests
 
 # a form's fields (the first value of each); repeated fields: values()
+# the fields of a form, or of a JSON object (the API's requests from the browser's program)
 fn fields(c: *web.Context) -> map[str]str {
   out := map[str]str{}
+  if strings.has_prefix(strings.to_lower(c.header("Content-Type")), "application/json") {
+    v, err := json.parse(c.body())
+    if err != nil { return out }
+    m, ok := v.to_any().(map[str]any)
+    if !ok { return out }
+    for k, x := range m {
+      switch y := x.(type) {
+      case str: out[k] = y
+      case int: out[k] = str(y)
+      case num: out[k] = str(y)
+      case bool: out[k] = str(y)
+      }
+    }
+    return out
+  }
   for k, vs := range web.parse_query(c.body()) {
     if len(vs) > 0 { out[k] = vs[0] }
   }
@@ -120,7 +136,6 @@ fn template() -> str {
   if template_text == "" || os.getenv("UI_DEV") != "" {
     t := ssr.template()
     t = strings.replace_all(t, "href=\"/shop.css\"", "href=\"/shop.css?v=" + version("shop.css") + "\"")
-    t = strings.replace_all(t, "src=\"/shop.js\"", "src=\"/shop.js?v=" + version("shop.js") + "\"")
     t = strings.replace_all(t, "src=\"/__ui/ui.js\"", "src=\"/__ui/ui.js?v=" + version("__ui/ui.js") + "\"")
     template_text = t
   }

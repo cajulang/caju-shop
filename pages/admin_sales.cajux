@@ -1,6 +1,6 @@
 # The panel: orders (list, detail, status), customers, coupons, settings (the store, shipping, the
 # team) and the audit log.
-import ui "../caju-ui/ui"
+import "github.com/cajulang/ui"
 import style "../caju-style/style"
 import "./model"
 import "./kit"

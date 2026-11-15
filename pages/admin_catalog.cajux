@@ -1,6 +1,7 @@
 # The panel: the dashboard, the products (list, bulk actions, form, stock), the categories and the
 # home's sections.
-import ui "../caju-ui/ui"
+import "github.com/cajulang/ui"
+import "github.com/cajulang/fetch"
 import style "../caju-style/style"
 import "std/json"
 import "std/strings"
@@ -612,10 +613,10 @@ export fn SectionEditor(p: SectionEditorProps) -> *ui.Node {
       found.set([]Found{})
       return
     }
-    kit.api("GET", "/api/sugestoes?q=" + model.esc(q), "", fn(code: int, body: str) {
-      if code != 200 { return }
+    kit.api.get("/sugestoes?q=" + model.esc(q)).done(fn(resp: *fetch.Response, err: error) {
+      if err != nil { return }
       r := []Found{}
-      json.unmarshal(body, &r)
+      resp.json(&r)
       found.set(r)
     })
   }

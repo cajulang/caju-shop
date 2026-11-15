@@ -1,5 +1,5 @@
 # The home: a banner, the departments and the sections the panel arranges.
-import ui "../caju-ui/ui"
+import "github.com/cajulang/ui"
 import style "../caju-style/style"
 import "./model"
 import "./kit"

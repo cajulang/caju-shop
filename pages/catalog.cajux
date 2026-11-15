@@ -1,6 +1,6 @@
 # The catalog's pages: a category or the search (the same page, with filters, facets, order and
 # pages) and a product.
-import ui "../caju-ui/ui"
+import "github.com/cajulang/ui"
 import style "../caju-style/style"
 import "./model"
 import "./kit"

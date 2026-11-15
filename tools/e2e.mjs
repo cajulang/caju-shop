@@ -2,7 +2,8 @@
 // and the panel, with the program in WebAssembly running (hydration, the API calls) and without it
 // (the plain forms). Needs the server running with the demonstration data:
 //   ./server reset && ./server migrate && ./server seed && ./server &
-//   BASE=http://127.0.0.1:3800 node tools/e2e.mjs        (SHOTS=dir saves screenshots)
+//   BASE=http://127.0.0.1:3800 node tools/e2e.mjs        (SHOTS=dir saves screenshots; CHROMIUM=path
+//   uses that browser instead of the one playwright installed)
 import { chromium } from "playwright"
 
 const BASE = process.env.BASE || "http://127.0.0.1:3800"
@@ -26,9 +27,10 @@ async function test(name, fn) {
   }
 }
 
-// the program in the worker is ready once the page answers an event: wait for hydration
+// the program in the worker is ready once it has sent the page its first batch (hydration):
+// every page collects ui.js's timings (window.__UI_STATS__, set before the page's scripts run)
 async function hydrated(page) {
-  await page.waitForFunction(() => document.querySelector("#app") && window.__UI_FNS__, null, { timeout: 10000 })
+  await page.waitForFunction(() => document.querySelector("#app") && (window.__UI_STATS__ || []).some((s) => s.apply !== undefined), null, { timeout: 10000 })
   await page.waitForTimeout(700)
 }
 
@@ -42,7 +44,14 @@ async function signIn(page, email, password) {
   await Promise.all([page.waitForNavigation(), page.click("form[action='/entrar'] button[type=submit]")])
 }
 
-const browser = await chromium.launch()
+const browser = await chromium.launch(process.env.CHROMIUM ? { executablePath: process.env.CHROMIUM } : {})
+const plainContext = browser.newContext.bind(browser)
+browser.newContext = async (options) => {
+  const ctx = await plainContext(options)
+  await ctx.addInitScript(() => { window.__UI_STATS__ = [] })
+  return ctx
+}
+browser.newPage = async (options) => (await browser.newContext(options)).newPage()
 const watch = (page) => {
   current = page
   page.on("pageerror", (e) => problems.push("pageerror: " + e.message))
