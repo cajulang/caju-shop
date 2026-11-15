@@ -35,7 +35,7 @@ export fn Login(p: LoginProps) -> *ui.Node {
         <kit.Field label="Senha" name="password" kind="password" value="" error={e["password"]} autocomplete="current-password" required={true} />
         <button class={kit.button_large} type="submit">Entrar</button>
         <p class={auth_foot}>Ainda não tem conta? <a class={kit.link} href={"/cadastro?next=" + model.esc(p.page.next)}>Cadastre-se</a></p>
-        <p class={demo_note}>Para testar: cliente <code>cliente@emporiocaju.dev</code> / <code>cliente123</code>; painel <code>admin@emporiocaju.dev</code> / <code>admin123</code>.</p>
+        {ui.when(p.page.demo, <p class={demo_note}>Loja de demonstração: as contas <code>cliente@emporiocaju.dev</code> e <code>admin@emporiocaju.dev</code> têm as senhas que <code>./server seed --dev</code> mostrou.</p>)}
       </form>
     </div>
   )
@@ -103,6 +103,7 @@ export fn AccountPage(p: AccountPageProps) -> *ui.Node {
             <kit.Field label="E-mail" name="email_ro" value={a.email} hint="O e-mail não pode ser trocado." />
             <kit.Field label="Celular" name="phone" kind="tel" value={phone} error={e["phone"]} />
             <kit.Field label="Nova senha" name="password" kind="password" value="" error={e["password"]} hint="Deixe em branco para manter a atual." autocomplete="new-password" />
+            <kit.Field label="Senha atual" name="current_password" kind="password" value="" error={e["current_password"]} hint="Só para trocar a senha. As outras sessões da conta são encerradas." autocomplete="current-password" />
             <button class={kit.button_primary} type="submit">Salvar</button>
           </div>
         </form>

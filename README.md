@@ -31,7 +31,8 @@ It puts together everything built for Caju so far:
   minimum, limit of uses, expiry), and a simulated Pix payment.
 - Orders: the stock is reserved in a transaction that locks the products' rows (`FOR UPDATE`), so
   two buyers cannot both get the last unit; a cancellation gives the stock and the coupon back.
-- Accounts: sign up, sign in, profile, addresses, order history.
+- Accounts: sign up, sign in, profile (a new password needs the current one and signs out the
+  account's other sessions), addresses, order history.
 
 **The panel** (`/admin`)
 - Dashboard: today's and the month's sales, average ticket, orders to ship, low stock, new
@@ -49,10 +50,35 @@ It puts together everything built for Caju so far:
 server answers them. The program adds what needs no reload: the cart, the suggestions, the
 filters that apply at once, the section editor, the chart, the picture preview.
 
-**Security**: passwords with PBKDF2-HMAC-SHA256 (60,000 rounds, random salt); sessions in an
-`HttpOnly`, `SameSite=Lax` cookie with 32 random bytes, of which the database keeps only the
-SHA-256; a new session on signing in; forms from another origin are refused; every SQL value goes
-as a parameter.
+**Security**
+- Passwords with PBKDF2-HMAC-SHA256, 600,000 iterations (OWASP's minimum) and a random salt. The
+  count is in each hash: an older, cheaper hash is made again when its owner signs in.
+- Hashing is slow on purpose and a process serves one request at a time, so it is rationed:
+  sign-in, sign-up and password change are refused (429) after 20 attempts per address (an IPv6
+  address counts by its /64) or 5 failures per e-mail in 15 minutes, counted in the database for
+  every process; and each process hashes at most 30 s of every minute (503 with `Retry-After`
+  beyond that), so a flood of sign-ins slows the sign-ins, not the store. A malformed form never
+  gets to the hash.
+- An e-mail without an account is checked against a dummy hash and gets the wrong password's
+  answer. The sign-up still says when an e-mail is taken (there is no e-mail verification to send
+  the answer to); the attempts per address limit how fast that can list accounts.
+- Sessions in an `HttpOnly`, `SameSite=Lax` cookie (`Secure` with `SECURE_COOKIES=1`) with 32
+  random bytes, of which the database keeps only the SHA-256; a new session on signing in and on
+  changing the password, which also ends the account's other sessions. A visitor's session lasts
+  7 days, a customer's 30.
+- Where a form sends the visitor back (`next`) is only a local path in printable ASCII: no CR/LF
+  (no headers), no tab, `//` or `/\` (no other site).
+- Only an administrator confirms a payment (in the panel). The customer's "Simular pagamento"
+  exists only in a demonstration store (`SHOP_DEMO_PAYMENTS=1`).
+- `X-Frame-Options: DENY`, `frame-ancestors 'none'` and a Content Security Policy that runs only
+  the store's scripts, its WebAssembly and the page's one inline script (by its hash);
+  `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`.
+- Bounded: the anonymous pages' cache (2,000 pages, 32 MB per process), the products' pictures'
+  cache, the sessions one address can open (60 per 10 minutes per process), and the tables:
+  expired sessions, abandoned visitors' carts (7 days) and day-old attempts are swept every 10
+  minutes (or with `./server sweep`).
+- Forms from another origin are refused; every SQL value goes as a parameter; there is no default
+  database password (`DATABASE_URL` is required).
 
 ## How it is built
 
@@ -64,9 +90,11 @@ kit.cajux         shared pieces: product card, add-to-cart, fields, pagination, 
 pages/            home, catalog (search, category, product), cart (cart, checkout, order),
                   account, admin_catalog and admin_sales (the panel)
 main.cajux        the browser: hydrates the page with the data the server put in it
-server.cajux      the routes, the forms, the JSON API, the panel, the files; also the commands
-back/             the server's side: db (pool, migrations), auth (passwords, sessions), catalog
-                  (search, menu), orders (cart, shipping, coupons, orders), admin, images, seed
+shop.cajux        the routes, the forms, the JSON API, the panel, the files (routes())
+server.cajux      the commands: serve, migrate, seed, reset, sweep
+back/             the server's side: db (pool, migrations), auth (passwords, sessions, sign-in
+                  limits), limits (next, counters, the hashing budget), catalog (search, menu),
+                  orders (cart, shipping, coupons, orders), admin, images, seed
 sql/              the migrations
 theme.caju        the palette; shop_css.caju writes the CSS
 ```
@@ -88,29 +116,51 @@ them). [web](https://github.com/cajulang/web), [ui](https://github.com/cajulang/
 `caju-ui` command from the ui package the lock file pins (or takes `CAJU_UI=path`).
 
 ```sh
-kubectl apply -f deploy/postgres.yaml       # or any PostgreSQL: DATABASE_URL=postgres://...
+# any PostgreSQL; deploy/postgres.yaml has one for a local cluster (its comments: a Secret for the
+# password, a port-forward on 127.0.0.1)
+export DATABASE_URL=postgres://user:password@127.0.0.1:5432/shop
 caju pkg install                            # web, ui and fetch
 tools/build.sh                              # the CSS, the program (wasm) and ./server
-./server migrate && ./server seed           # the schema and the demonstration data
-./server                                    # http://localhost:3800 (PORT, HOST, WORKERS)
+./server migrate                            # the schema
+./server seed --dev                         # demonstration data (development only)
+./server                                    # http://localhost:3800
 ```
 
-Demonstration accounts: `admin@emporiocaju.dev` / `admin123` (administrator),
-`operador@emporiocaju.dev` / `operador123` (operator), `cliente@emporiocaju.dev` / `cliente123`
-(a customer with orders). Coupons: `BEMVINDO10`, `FRETEJUNINO`, `CAJU20`.
+`./server seed --dev` gives the demonstration accounts `admin@emporiocaju.dev` (administrator),
+`operador@emporiocaju.dev` (operator) and `cliente@emporiocaju.dev` (a customer with orders) random
+passwords, printed once (`SEED_ADMIN_PASSWORD`, `SEED_OPERATOR_PASSWORD` and
+`SEED_CUSTOMER_PASSWORD` choose them instead). Coupons: `BEMVINDO10`, `FRETEJUNINO`, `CAJU20`.
+`./server reset --dev` drops everything. Neither runs without `--dev`.
 
-`./server reset` drops everything. `WORKERS=4 ./server` serves with 4 processes (each with its own
-connection pool and cache).
+| variable | |
+|---|---|
+| `DATABASE_URL` | required: `postgres://user:password@host:port/database` |
+| `PORT`, `HOST` | where to listen (3800, 127.0.0.1) |
+| `WORKERS` | processes (each with its own connection pool, cache and hashing budget) |
+| `TRUSTED_PROXIES` | the addresses of the reverse proxies in front of the store, comma-separated: their `X-Forwarded-For` is the client's address for the limits. Unset, the connection's address is used and the header is ignored (anyone could write it) |
+| `SECURE_COOKIES=1` | the session cookie is `Secure`: set it when the store is reached over HTTPS |
+| `SHOP_DEMO_PAYMENTS=1` | customers may mark their own orders as paid (a demonstration store) |
+| `SHOP_PBKDF2_ITERATIONS` | the work of new hashes (600,000) |
+| `SHOP_HASH_BUDGET_MS` | the milliseconds of each minute a process may spend hashing (30,000) |
+| `SHOP_IP_ATTEMPTS`, `SHOP_ACCOUNT_FAILURES` | attempts per address, failures per e-mail in 15 minutes (20, 5) |
+| `SHOP_GUEST_SESSIONS` | new visitors' sessions per address in 10 minutes, per process (60) |
+
+A hash of 600,000 iterations takes about 5 s with caju 0.9's PBKDF2, and a process serves no one
+else meanwhile: run several `WORKERS`, or lower `SHOP_PBKDF2_ITERATIONS` knowing what it costs.
 
 ## Tests
 
 ```sh
-caju test                                         # money, URLs, slugs, the search's words, passwords
-SHOP_TEST_DSN=postgres://.../shop_test caju test  # also the rules against a database (emptied!):
-                                                  # the last unit, cancellations, coupons, shipping
+tools/build.sh                                    # first: http_test.caju imports the generated shop.caju
+caju test                                         # money, URLs, slugs, the search's words, passwords,
+                                                  # next, the limits' counters and budget
+SHOP_TEST_DSN=postgres://.../shop_test caju test  # also against a database (emptied!): the last unit,
+                                                  # cancellations, coupons, shipping, and the security
+                                                  # rules over HTTP (http_test.caju, web.test_request)
 npm install && node tools/e2e.mjs                 # 79 checks in Chromium against a running ./server
                                                   # with fresh data (the store, the cart with and
-                                                  # without WebAssembly, checkout, accounts, the panel)
+                                                  # without WebAssembly, checkout, accounts, the panel;
+                                                  # its header says how to start the server)
 ```
 
 ## Performance

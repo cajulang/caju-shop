@@ -86,6 +86,7 @@ export fn OrderDetail(p: OrderDetailProps) -> *ui.Node {
   e := kit.errors_of(p.page)
   actions := []*ui.Node{}
   for _, s := range next_statuses(o.status) {
+    if s == "paid" && !model.can_edit(p.page.user) { continue }       # administrators only
     cls := kit.button_primary
     if s == "canceled" { cls = kit.button_danger }
     extra := ui.empty()
@@ -105,7 +106,7 @@ export fn OrderDetail(p: OrderDetailProps) -> *ui.Node {
       <a class={kit.link} href="/admin/pedidos">← Pedidos</a>
       {ui.when(e["form"] != "", <div class={kit.alert_error} role="alert">{e["form"]}</div>)}
       <div class={detail_grid}>
-        <cart.OrderView order={*o} admin={true} />
+        <cart.OrderView order={*o} admin={true} demo={false} />
         <div class={kit.stack}>
           <section class={panel}>
             <h2 class={panel_title}>Cliente</h2>

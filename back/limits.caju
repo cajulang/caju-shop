@@ -1,0 +1,167 @@
+# Defences that need no database: where a form may send the visitor back to (safe_next), the key of
+# a client's address for limits (ip_key), a fixed-window counter with a bounded number of keys
+# (Window) and the share of a process's time that password hashing may take (Budget).
+#
+# Each process keeps its own (WORKERS runs several, without shared memory): the limits that must
+# hold across processes (sign-in attempts) live in the database (back/auth).
+import "std/strings"
+
+# ---------------------------------------------------------------- redirects
+
+# a local path to go back to after a form, or "" (then the caller picks its own). Only printable
+# ASCII without spaces (no CR/LF that could add headers, no tab or other characters that browsers
+# drop from URLs, so "/\t/evil.com" cannot become "//evil.com"); a single leading "/" not followed
+# by "/" or "\" (no other host); no backslash anywhere; and at most 512 bytes.
+export fn safe_next(s: str) -> str {
+  if len(s) == 0 || len(s) > 512 || int(s[0]) != '/' { return "" }
+  if len(s) > 1 && (int(s[1]) == '/' || int(s[1]) == '\\') { return "" }
+  for i := 0; i < len(s); i++ {
+    ch := int(s[i])
+    if ch <= 32 || ch >= 127 || ch == '\\' { return "" }
+  }
+  return s
+}
+
+# ---------------------------------------------------------------- addresses
+
+# the key of an address for the limits: an IPv4 address as it is, an IPv6 address by its /64 (one
+# customer usually gets a whole /64, so counting single addresses would be no limit at all)
+export fn ip_key(ip: str) -> str {
+  ip = strings.trim_space(ip)
+  if strings.has_prefix(ip, "[") {
+    end := strings.index(ip, "]")
+    if end > 0 { ip = ip[1:end] }
+  }
+  if !strings.contains(ip, ":") { return ip }
+  ip = strings.to_lower(ip)
+  # expand "::" so the first four groups are the first four groups
+  head := ip
+  tail := ""
+  dc := strings.index(ip, "::")
+  if dc >= 0 {
+    head = ip[0:dc]
+    tail = ip[dc + 2:]
+  }
+  hs := []str{}
+  if head != "" { hs = strings.split(head, ":") }
+  ts := []str{}
+  if tail != "" { ts = strings.split(tail, ":") }
+  groups := []str{}
+  for _, g := range hs { groups = append(groups, g) }
+  if dc >= 0 {
+    for i := len(hs) + len(ts); i < 8; i++ { groups = append(groups, "0") }
+  }
+  for _, g := range ts { groups = append(groups, g) }
+  out := []str{}
+  for i := 0; i < 4 && i < len(groups); i++ {
+    g := groups[i]
+    while len(g) > 1 && int(g[0]) == '0' { g = g[1:] }
+    out = append(out, g)
+  }
+  return strings.join(out, ":") + "::/64"
+}
+
+# ---------------------------------------------------------------- counters
+
+# at most `limit` events per key in each window of `span_ns`; never more than `max_keys` keys in
+# memory (when full, the expired ones go, and if that is not enough, every key goes: a flood of
+# new keys forgets the old counts instead of eating the memory)
+export struct Window {
+  limit: int
+  span_ns: int
+  max_keys: int
+  counts: map[str]int
+  starts: map[str]int
+}
+
+export fn new_window(limit: int, span_ns: int, max_keys: int) -> *Window {
+  return &Window{limit: limit, span_ns: span_ns, max_keys: max_keys, counts: map[str]int{}, starts: map[str]int{}}
+}
+
+# counts an event for key at now (nanoseconds); false when the key has used its window
+export fn (w: *Window) allow(key: str, now: int) -> bool {
+  start, ok := w.starts[key]
+  if !ok || now - start >= w.span_ns {
+    if !ok && len(w.starts) >= w.max_keys { w.prune(now) }
+    w.starts[key] = now
+    w.counts[key] = 0
+  }
+  if w.counts[key] >= w.limit { return false }
+  w.counts[key] = w.counts[key] + 1
+  return true
+}
+
+export fn (w: *Window) len() -> int { return len(w.starts) }
+
+fn (w: *Window) prune(now: int) {
+  old := []str{}
+  for k, s := range w.starts {
+    if now - s >= w.span_ns { old = append(old, k) }
+  }
+  for _, k := range old {
+    delete(w.starts, k)
+    delete(w.counts, k)
+  }
+  if len(w.starts) >= w.max_keys {
+    w.starts = map[str]int{}
+    w.counts = map[str]int{}
+  }
+}
+
+# ---------------------------------------------------------------- the hashing budget
+
+# PBKDF2 is slow on purpose and a process does one thing at a time: while it hashes, nobody else
+# is served. A Budget lets hashing take at most max_ns of each span_ns (say 30 s of every minute),
+# so a flood of sign-ins from many addresses slows the sign-ins down, not the store.
+export struct Budget {
+  span_ns: int
+  max_ns: int
+  ends: []int        # when each recent hash ended
+  costs: []int       # and how long it took
+}
+
+export fn new_budget(span_ns: int, max_ns: int) -> *Budget {
+  return &Budget{span_ns: span_ns, max_ns: max_ns, ends: []int{}, costs: []int{}}
+}
+
+# the time spent hashing in the window that ends at now
+export fn (b: *Budget) spent(now: int) -> int {
+  keep_e := []int{}
+  keep_c := []int{}
+  total := 0
+  for i, e := range b.ends {
+    if now - e < b.span_ns {
+      keep_e = append(keep_e, e)
+      keep_c = append(keep_c, b.costs[i])
+      total += b.costs[i]
+    }
+  }
+  b.ends = keep_e
+  b.costs = keep_c
+  return total
+}
+
+# may a hash start now?
+export fn (b: *Budget) allow(now: int) -> bool { return b.spent(now) < b.max_ns }
+
+# a hash that ended at now and took cost_ns
+export fn (b: *Budget) record(now: int, cost_ns: int) {
+  b.spent(now)
+  b.ends = append(b.ends, now)
+  b.costs = append(b.costs, cost_ns)
+}
+
+# seconds until a hash may start again (for Retry-After), at least 1
+export fn (b: *Budget) retry_after(now: int) -> int {
+  over := b.spent(now) - b.max_ns
+  wait := 1
+  # the oldest hashes leave the window first
+  freed := 0
+  for i, e := range b.ends {
+    if freed > over { break }
+    freed += b.costs[i]
+    wait = (e + b.span_ns - now) / 1000000000 + 1
+  }
+  if wait < 1 { wait = 1 }
+  return wait
+}

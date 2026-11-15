@@ -261,12 +261,14 @@ export fn run() {
   # coupons
   db.exec("insert into coupons (code, kind, value, min_cents, max_uses, expires_at) values ('BEMVINDO10', 'percent', 10, 0, null, null), ('FRETEJUNINO', 'fixed', 1590, 10000, 500, now() + interval '60 days'), ('CAJU20', 'percent', 20, 20000, 100, now() + interval '30 days'), ('NATAL2024', 'percent', 15, 0, null, now() - interval '300 days')", []any{})
 
-  # people: the admin, an operator, customers (one password hash for all of them: they are fake,
-  # and PBKDF2 is slow on purpose)
-  admin_pw := os.getenv("ADMIN_PASSWORD")
-  if admin_pw == "" { admin_pw = "admin123" }
-  db.exec("insert into customers (name, email, password_hash, role) values ('Administração', 'admin@emporiocaju.dev', $1, 'admin'), ('Operação', 'operador@emporiocaju.dev', $2, 'operator')", []any{auth.hash_password(admin_pw), auth.hash_password("operador123")})
-  demo := auth.hash_password("cliente123")
+  # people: the admin, an operator, the demonstration customer and fake customers. Each of the
+  # first three gets a random password (or SEED_*_PASSWORD), printed once at the end; the fake
+  # customers share the hash of a random password nobody sees (PBKDF2 is slow on purpose)
+  admin_pw := seed_password("SEED_ADMIN_PASSWORD")
+  operator_pw := seed_password("SEED_OPERATOR_PASSWORD")
+  customer_pw := seed_password("SEED_CUSTOMER_PASSWORD")
+  db.exec("insert into customers (name, email, password_hash, role) values ('Administração', 'admin@emporiocaju.dev', $1, 'admin'), ('Operação', 'operador@emporiocaju.dev', $2, 'operator')", []any{auth.hash_password(admin_pw), auth.hash_password(operator_pw)})
+  demo := auth.hash_password(auth.random_password())
   firsts := strings.split(FIRST, " ")
   lasts := strings.split(LAST, " ")
   cities := strings.split(CITIES, "|")
@@ -289,6 +291,7 @@ export fn run() {
     if i == 0 { k = 0 }
     cep := cities[k + 2] + str(100000 + rnd(899999))
     while len(cep) < 8 { cep = cep + "0" }
+    if i == 0 { db.exec("update customers set password_hash = $2 where id = $1", []any{cid, auth.hash_password(customer_pw)}) }
     addr_of[cid] = db.row("insert into addresses (customer_id, label, cep, street, number, district, city, state) values ($1, 'Casa', $2, $3, $4, $5, $6, $7) returning id", []any{cid, cep[0:8], pick(streets), str(10 + rnd(1500)), pick(districts), cities[k], cities[k + 1]}).get_int("id")
     customers = append(customers, cid)
   }
@@ -327,7 +330,18 @@ export fn run() {
   db.exec("insert into audit_log (action, entity, detail) values ('seed', 'loja', $1)", []any{"dados de demonstração: " + str(n) + " produtos, " + str(len(customers)) + " clientes, " + str(orders) + " pedidos"})
   ms := (os.nanotime() - started) / 1000000
   print("seed: " + str(len(cat_ids)) + " categories, " + str(n) + " products, " + str(len(customers)) + " customers, " + str(orders) + " orders (" + str(ms) + " ms)")
-  print("  admin: admin@emporiocaju.dev / " + admin_pw + "   operator: operador@emporiocaju.dev / operador123   customer: cliente@emporiocaju.dev / cliente123")
+  print("demonstration accounts (the passwords are shown only now):")
+  print("  admin     admin@emporiocaju.dev     " + admin_pw)
+  print("  operator  operador@emporiocaju.dev  " + operator_pw)
+  print("  customer  cliente@emporiocaju.dev   " + customer_pw)
+}
+
+# the password of a demonstration account: the environment's (for scripted runs, such as the
+# end-to-end tests) or a random one
+fn seed_password(env: str) -> str {
+  p := os.getenv(env)
+  if len(p) >= 8 { return p }
+  return auth.random_password()
 }
 
 fn parse_factor(s: str) -> num {
@@ -370,5 +384,5 @@ fn describe(cat: str, variant: str) -> str {
 
 # drops every table (development)
 export fn reset() {
-  db.exec("drop schema public cascade; create schema public", []any{})
+  db.script("drop schema public cascade; create schema public")
 }

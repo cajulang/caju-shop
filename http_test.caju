@@ -1,0 +1,427 @@
+# The store over HTTP, without a network (web.test_request through shop.routes()): the security
+# fixes of the audit, each from the outside. Needs SHOP_TEST_DSN (the database is emptied and
+# seeded!) and the generated .caju files (tools/build.sh, or caju-ui gen).
+#   SHOP_TEST_DSN=postgres://... caju test http_test.caju
+import { describe, it, skip, expect } from "std/testing"
+import "std/os"
+import "std/strings"
+import "github.com/cajulang/web"
+import "./model"
+import "./shop"
+import "./back/db"
+import "./back/auth"
+import "./back/orders"
+import "./back/seed"
+
+let DSN = os.getenv("SHOP_TEST_DSN")
+let engine: *web.Engine = nil
+const PW = "senha-de-teste-1"
+
+fn dbit(title: str, body: fn()) {
+  if DSN == "" {
+    skip(title, body)
+    return
+  }
+  it(title, body)
+}
+
+fn setup() {
+  if engine != nil { return }
+  auth.set_iterations(1000)
+  db.use(DSN)
+  seed.reset()
+  db.migrate("sql")
+  seed.run()
+  known_passwords()
+  shop.set_quiet(true)
+  engine = shop.routes()
+  # test_request comes from 192.0.2.1: as a trusted proxy, its X-Forwarded-For names the client,
+  # so each test can be its own address
+  engine.trusted_proxies = []str{"192.0.2.1"}
+}
+
+# the demonstration accounts, with a password the tests know
+fn known_passwords() {
+  db.exec("update customers set password_hash = $1 where email in ('admin@emporiocaju.dev', 'operador@emporiocaju.dev', 'cliente@emporiocaju.dev')", []any{auth.hash_password(PW)})
+}
+
+let last_ip: int = 10
+
+fn new_ip() -> str {
+  last_ip++
+  return "198.51.100." + str(last_ip)
+}
+
+# a browser: its address and its session cookie
+struct Client {
+  ip: str
+  sid: str
+}
+
+fn client() -> *Client { return &Client{ip: new_ip(), sid: ""} }
+
+fn (cl: *Client) req(method: str, path: str, body: str) -> *web.TestResponse {
+  h := map[str]str{"X-Forwarded-For": cl.ip}
+  if cl.sid != "" { h["Cookie"] = "sid=" + cl.sid }
+  if method == "POST" { h["Content-Type"] = "application/x-www-form-urlencoded" }
+  r := web.test_request(engine, method, path, body, h)
+  sc := r.header("Set-Cookie")
+  if strings.has_prefix(sc, "sid=") { cl.sid = sc[4:strings.index(sc, ";")] }
+  return r
+}
+
+fn form(kv: []str) -> str {
+  parts := []str{}
+  for i := 0; i + 1 < len(kv); i += 2 { parts = append(parts, kv[i] + "=" + model.esc(kv[i + 1])) }
+  return strings.join(parts, "&")
+}
+
+fn login(cl: *Client, email: str, password: str, next: str) -> *web.TestResponse {
+  return cl.req("POST", "/entrar", form([]str{"email", email, "password", password, "next", next}))
+}
+
+fn signed_in(email: str) -> *Client {
+  cl := client()
+  r := login(cl, email, PW, "")
+  expect(r.status).to_equal(303)
+  return cl
+}
+
+fn customer_id(email: str) -> int { return db.scalar_int("select id from customers where email = $1", []any{email}) }
+
+# a pending order of the demonstration customer, placed now
+fn pending_order() -> int {
+  cid := customer_id("cliente@emporiocaju.dev")
+  cart := auth.cart_of_customer(cid)
+  db.exec("delete from cart_items where cart_id = $1", []any{cart})
+  pid := db.scalar_int("select id from products where active and stock > 5 order by id limit 1", []any{})
+  expect(orders.cart_add(cart, pid, 1)).to_equal("")
+  id, problem := orders.place(cid, cart, orders.addresses(cid)[0].id, "")
+  expect(problem).to_equal("")
+  return id
+}
+
+fn status_of(order: int) -> str {
+  return db.row("select status from orders where id = $1", []any{order}).get_str("status")
+}
+
+# ---------------------------------------------------------------- D-1, D-2: next
+
+describe("D-1/D-2: where signing in sends the visitor (next)", fn() {
+  dbit("CR/LF in next cannot add a header (no session fixation)", fn() {
+    setup()
+    r := login(client(), "cliente@emporiocaju.dev", PW, "/\r\nSet-Cookie: sid=" + strings.repeat("a", 64))
+    expect(r.status).to_equal(303)
+    expect(r.header("Location")).to_equal("/conta")
+    expect(r.header("Set-Cookie")).not_().to_contain(strings.repeat("a", 64))
+  })
+  dbit("a tab, // or /\\ cannot send the visitor to another site", fn() {
+    setup()
+    for _, bad := range []str{"/\t/evil.example", "//evil.example", "/\\evil.example", "https://evil.example", "/%09/evil.example"} {
+      r := login(client(), "cliente@emporiocaju.dev", PW, bad)
+      loc := r.header("Location")
+      if bad == "/%09/evil.example" {
+        expect(loc).to_equal(bad)                 # a literal "%09" stays a path on this site
+      } else {
+        expect(loc).to_equal("/conta")
+      }
+    }
+  })
+  dbit("the sign-in page does not carry a bad next into its form", fn() {
+    setup()
+    r := client().req("GET", "/entrar?next=%2F%0D%0ASet-Cookie%3A+x%3Dy", "")
+    expect(r.status).to_equal(200)
+    expect(r.body).not_().to_contain("Set-Cookie: x=y")
+    r2 := client().req("GET", "/entrar?next=%2F%09%2Fevil.example", "")
+    expect(r2.body).not_().to_contain("evil.example")
+  })
+  dbit("a local next still works", fn() {
+    setup()
+    r := login(client(), "cliente@emporiocaju.dev", PW, "/carrinho?x=1")
+    expect(r.header("Location")).to_equal("/carrinho?x=1")
+  })
+})
+
+# ---------------------------------------------------------------- D-3: limits
+
+describe("D-3: sign-in and sign-up limits", fn() {
+  dbit("an account takes 5 wrong passwords in 15 minutes, then not even the right one", fn() {
+    setup()
+    email := "cliente@emporiocaju.dev"
+    db.exec("delete from login_attempts", []any{})
+    for i := 0; i < 5; i++ {
+      r := login(client(), email, "errada" + str(i), "")
+      expect(r.status).to_equal(422)
+    }
+    r := login(client(), email, PW, "")              # another address, the right password
+    expect(r.status).to_equal(429)
+    expect(r.header("Retry-After")).to_equal("900")
+    expect(r.body).to_contain("Muitas tentativas para esta conta")
+    expect(r.header("Set-Cookie")).not_().to_contain("Max-Age=2592000")
+    db.exec("delete from login_attempts", []any{})
+    expect(login(client(), email, PW, "").status).to_equal(303)
+  })
+  dbit("an address takes 20 attempts in 15 minutes, on any accounts; another address is not affected", fn() {
+    setup()
+    db.exec("delete from login_attempts", []any{})
+    cl := client()
+    for i := 0; i < 20; i++ {
+      r := login(cl, "ninguem" + str(i) + "@exemplo.com", "qualquer-coisa", "")
+      expect(r.status).to_equal(422)
+    }
+    r := login(cl, "cliente@emporiocaju.dev", PW, "")
+    expect(r.status).to_equal(429)
+    expect(r.body).to_contain("a partir desta rede")
+    s := cl.req("POST", "/cadastro", form([]str{"name", "Fulano de Tal", "email", "novo-limite@exemplo.com", "password", "12345678"}))
+    expect(s.status).to_equal(429)
+    expect(login(client(), "cliente@emporiocaju.dev", PW, "").status).to_equal(303)
+    db.exec("delete from login_attempts", []any{})
+  })
+  dbit("X-Forwarded-For from an untrusted address changes nothing", fn() {
+    setup()
+    db.exec("delete from login_attempts", []any{})
+    engine.trusted_proxies = []str{}
+    for i := 0; i < 20; i++ { login(client(), "ninguem" + str(i) + "@exemplo.com", "x", "") }
+    # every request came from 192.0.2.1, whatever the header said
+    expect(login(client(), "cliente@emporiocaju.dev", PW, "").status).to_equal(429)
+    engine.trusted_proxies = []str{"192.0.2.1"}
+    db.exec("delete from login_attempts", []any{})
+  })
+  dbit("a malformed form costs no hash and no attempt", fn() {
+    setup()
+    db.exec("delete from login_attempts", []any{})
+    cl := client()
+    expect(login(cl, "nao-e-email", "x", "").status).to_equal(422)
+    expect(login(cl, "a@b.com", strings.repeat("x", 2000), "").status).to_equal(422)
+    expect(db.scalar_int("select count(*)::int from login_attempts", []any{})).to_equal(0)
+  })
+  dbit("when the process has spent its hashing budget, sign-ins wait (503) instead of the store", fn() {
+    setup()
+    db.exec("delete from login_attempts", []any{})
+    auth.set_hash_budget(0)
+    r := login(client(), "cliente@emporiocaju.dev", PW, "")
+    expect(r.status).to_equal(503)
+    expect(r.header("Retry-After") != "").to_be_true()
+    s := client().req("POST", "/cadastro", form([]str{"name", "Fulano de Tal", "email", "budget@exemplo.com", "password", "12345678"}))
+    expect(s.status).to_equal(503)
+    # the store itself still answers
+    expect(client().req("GET", "/busca?q=cocada", "").status).to_equal(200)
+    auth.set_hash_budget(30000)
+    expect(login(client(), "cliente@emporiocaju.dev", PW, "").status).to_equal(303)
+  })
+})
+
+# ---------------------------------------------------------------- D-4: payments
+
+describe("D-4: who marks an order as paid", fn() {
+  dbit("a customer cannot pay their own order unless the store is a demonstration", fn() {
+    setup()
+    shop.set_demo_payments(false)
+    order := pending_order()
+    cl := signed_in("cliente@emporiocaju.dev")
+    page := cl.req("GET", "/pedidos/" + str(order), "")
+    expect(page.status).to_equal(200)
+    expect(page.body).not_().to_contain("Simular pagamento")
+    r := cl.req("POST", "/pedidos/" + str(order) + "/pagar", "")
+    expect(r.status).to_equal(404)
+    expect(status_of(order)).to_equal("pending")
+    shop.set_demo_payments(true)
+    expect(cl.req("GET", "/pedidos/" + str(order), "").body).to_contain("Simular pagamento")
+    expect(cl.req("POST", "/pedidos/" + str(order) + "/pagar", "").status).to_equal(303)
+    expect(status_of(order)).to_equal("paid")
+    shop.set_demo_payments(false)
+  })
+  dbit("in the panel, an operator cannot confirm a payment; an administrator can", fn() {
+    setup()
+    order := pending_order()
+    op := signed_in("operador@emporiocaju.dev")
+    detail := op.req("GET", "/admin/pedidos/" + str(order), "")
+    expect(detail.body).not_().to_contain("Confirmar pagamento")
+    r := op.req("POST", "/admin/pedidos/" + str(order) + "/situacao", form([]str{"status", "paid", "note", ""}))
+    expect(r.status).to_equal(403)
+    expect(status_of(order)).to_equal("pending")
+    adm := signed_in("admin@emporiocaju.dev")
+    expect(adm.req("GET", "/admin/pedidos/" + str(order), "").body).to_contain("Confirmar pagamento")
+    expect(adm.req("POST", "/admin/pedidos/" + str(order) + "/situacao", form([]str{"status", "paid", "note", ""})).status).to_equal(303)
+    expect(status_of(order)).to_equal("paid")
+    # operators still handle the rest
+    expect(op.req("POST", "/admin/pedidos/" + str(order) + "/situacao", form([]str{"status", "shipped", "tracking", "BR1NE"})).status).to_equal(303)
+    expect(status_of(order)).to_equal("shipped")
+  })
+})
+
+# ---------------------------------------------------------------- D-5: demonstration passwords
+
+describe("D-5: the demonstration accounts", fn() {
+  dbit("seed gives them random passwords, never the old fixed ones", fn() {
+    seed.reset()
+    db.migrate("sql")
+    seed.run()
+    for _, e := range []str{"admin@emporiocaju.dev", "operador@emporiocaju.dev", "cliente@emporiocaju.dev"} {
+      h := db.row("select password_hash from customers where email = $1", []any{e}).get_str("password_hash")
+      for _, old := range []str{"admin123", "operador123", "cliente123"} { expect(auth.check_password(old, h)).to_be_false() }
+    }
+    known_passwords()
+  })
+  dbit("the sign-in page shows no passwords", fn() {
+    setup()
+    shop.set_demo_payments(true)
+    b := client().req("GET", "/entrar", "").body
+    expect(b).not_().to_contain("admin123")
+    expect(b).not_().to_contain("cliente123")
+    shop.set_demo_payments(false)
+  })
+})
+
+# ---------------------------------------------------------------- D-7: changing the password
+
+describe("D-7: changing the password", fn() {
+  dbit("needs the current password, and ends the account's other sessions", fn() {
+    setup()
+    db.exec("delete from login_attempts", []any{})
+    email := "cliente@emporiocaju.dev"
+    a := signed_in(email)
+    b := signed_in(email)
+    expect(b.req("GET", "/conta", "").status).to_equal(200)
+    r1 := a.req("POST", "/conta", form([]str{"name", "Maria Cliente", "phone", "", "password", "nova-senha-123"}))
+    expect(r1.status).to_equal(422)
+    expect(r1.body).to_contain("Informe a senha atual")
+    r2 := a.req("POST", "/conta", form([]str{"name", "Maria Cliente", "phone", "", "password", "nova-senha-123", "current_password", "errada"}))
+    expect(r2.status).to_equal(422)
+    expect(r2.body).to_contain("não confere")
+    expect(b.req("GET", "/conta", "").status).to_equal(200)          # nothing changed yet
+    old_sid := a.sid
+    r3 := a.req("POST", "/conta", form([]str{"name", "Maria Cliente", "phone", "", "password", "nova-senha-123", "current_password", PW}))
+    expect(r3.status).to_equal(303)
+    expect(a.sid == old_sid).to_be_false()                            # a new token for this browser
+    expect(a.req("GET", "/conta", "").status).to_equal(200)
+    expect(b.req("GET", "/conta", "").status).to_equal(303)          # the other session ended
+    expect(login(client(), email, PW, "").status).to_equal(422)
+    expect(login(client(), email, "nova-senha-123", "").status).to_equal(303)
+    db.exec("update customers set password_hash = $2 where email = $1", []any{email, auth.hash_password(PW)})
+    db.exec("delete from login_attempts", []any{})
+  })
+  dbit("the name can change without the password", fn() {
+    setup()
+    a := signed_in("cliente@emporiocaju.dev")
+    expect(a.req("POST", "/conta", form([]str{"name", "Maria Cliente", "phone", "(81) 90000-0000", "password", ""})).status).to_equal(303)
+  })
+})
+
+# ---------------------------------------------------------------- the low ones
+
+describe("account enumeration", fn() {
+  dbit("an e-mail without an account gets the wrong password's answer, and is counted", fn() {
+    setup()
+    db.exec("delete from login_attempts", []any{})
+    a := login(client(), "nao-existe@exemplo.com", "qualquer-coisa", "")
+    b := login(client(), "cliente@emporiocaju.dev", "qualquer-coisa", "")
+    expect(a.status).to_equal(b.status)
+    expect(a.body).to_contain("E-mail ou senha não conferem.")
+    expect(b.body).to_contain("E-mail ou senha não conferem.")
+    expect(db.scalar_int("select count(*)::int from login_attempts where email = 'nao-existe@exemplo.com' and not ok", []any{})).to_equal(1)
+  })
+})
+
+describe("old hashes", fn() {
+  dbit("are made again with today's iterations when their owner signs in", fn() {
+    setup()
+    db.exec("delete from login_attempts", []any{})
+    email := "cliente@emporiocaju.dev"
+    auth.set_iterations(1000)
+    db.exec("update customers set password_hash = $2 where email = $1", []any{email, auth.hash_password(PW)})
+    auth.set_iterations(1200)
+    expect(login(client(), email, PW, "").status).to_equal(303)
+    expect(db.row("select password_hash from customers where email = $1", []any{email}).get_str("password_hash")).to_start_with("pbkdf2$1200$")
+    auth.set_iterations(1000)
+  })
+})
+
+describe("cookies and headers", fn() {
+  dbit("the session cookie is HttpOnly and SameSite=Lax, and Secure when SECURE_COOKIES is on", fn() {
+    setup()
+    db.exec("delete from login_attempts", []any{})
+    sc := login(client(), "cliente@emporiocaju.dev", PW, "").header("Set-Cookie")
+    expect(sc).to_contain("HttpOnly")
+    expect(sc).to_contain("SameSite=Lax")
+    expect(sc).not_().to_contain("Secure")
+    auth.set_secure_cookies(true)
+    sc2 := login(client(), "cliente@emporiocaju.dev", PW, "").header("Set-Cookie")
+    expect(sc2).to_contain("; Secure")
+    auth.set_secure_cookies(false)
+  })
+  dbit("pages cannot be framed, and run only the store's scripts (CSP)", fn() {
+    setup()
+    r := client().req("GET", "/", "")
+    expect(r.header("X-Frame-Options")).to_equal("DENY")
+    expect(r.header("X-Content-Type-Options")).to_equal("nosniff")
+    expect(r.header("Referrer-Policy")).to_equal("same-origin")
+    csp := r.header("Content-Security-Policy")
+    expect(csp).to_contain("frame-ancestors 'none'")
+    expect(csp).to_contain("object-src 'none'")
+    expect(csp).not_().to_contain("'unsafe-eval'")                     # only 'wasm-unsafe-eval'
+    expect(csp).not_().to_contain("script-src 'self' 'unsafe-inline'")
+    # the page's inline script is allowed by its hash, and it is the page's only one
+    hashes := shop.inline_script_hashes(r.body)
+    expect(len(hashes)).to_equal(1)
+    expect(csp).to_contain("'sha256-" + hashes[0] + "'")
+    # also on files and errors
+    expect(client().req("GET", "/icon.svg", "").header("X-Frame-Options")).to_equal("DENY")
+    expect(client().req("GET", "/nao-existe", "").header("Content-Security-Policy")).to_contain("frame-ancestors")
+  })
+})
+
+describe("bounded memory and tables", fn() {
+  dbit("the anonymous pages' cache keeps at most its limit of pages and bytes", fn() {
+    setup()
+    shop.set_cache_limits(5, 1 << 30)
+    for i := 0; i < 12; i++ { client().req("GET", "/busca?q=cocada" + str(i), "") }
+    n, _ := shop.page_cache_size()
+    expect(n).to_be_at_most(5)
+    shop.set_cache_limits(1000, 200000)
+    for i := 0; i < 12; i++ { client().req("GET", "/busca?q=doce" + str(i), "") }
+    _, bytes := shop.page_cache_size()
+    expect(bytes).to_be_at_most(200000)
+    shop.set_cache_limits(2000, 32 << 20)
+  })
+  dbit("a visitor without a cookie cannot open sessions and carts without end", fn() {
+    setup()
+    auth.set_guest_session_limit(3)
+    pid := db.scalar_int("select id from products where active and stock > 5 order by id limit 1", []any{})
+    ip := new_ip()
+    before := db.scalar_int("select count(*)::int from sessions", []any{})
+    carts := db.scalar_int("select count(*)::int from carts", []any{})
+    last := 0
+    for i := 0; i < 5; i++ {
+      cl := &Client{ip: ip, sid: ""}                                   # drops its cookie each time
+      last = cl.req("POST", "/carrinho", form([]str{"product_id", str(pid), "qty", "1"})).status
+    }
+    expect(last).to_equal(429)
+    expect(db.scalar_int("select count(*)::int from sessions", []any{}) - before).to_equal(3)
+    expect(db.scalar_int("select count(*)::int from carts", []any{}) - carts).to_equal(3)
+    auth.set_guest_session_limit(60)
+  })
+  dbit("the sweep removes expired sessions, abandoned carts and old attempts", fn() {
+    setup()
+    cart := db.row("insert into carts (updated_at) values (now() - interval '30 days') returning id", []any{}).get_int("id")
+    live := db.row("insert into carts default values returning id", []any{}).get_int("id")
+    db.exec("insert into sessions (token_hash, cart_id, expires_at) values ('expired-test', $1, now() - interval '1 hour')", []any{cart})
+    db.exec("insert into sessions (token_hash, cart_id, expires_at) values ('live-test', $1, now() + interval '1 day')", []any{live})
+    db.exec("insert into login_attempts (ip, email, ok, at) values ('203.0.113.1', 'x@y.z', false, now() - interval '2 days')", []any{})
+    expect(auth.sweep()).to_be_at_least(3)
+    expect(db.scalar_int("select count(*)::int from sessions where token_hash = 'expired-test'", []any{})).to_equal(0)
+    expect(db.scalar_int("select count(*)::int from carts where id = $1", []any{cart})).to_equal(0)
+    expect(db.scalar_int("select count(*)::int from sessions where token_hash = 'live-test'", []any{})).to_equal(1)
+    expect(db.scalar_int("select count(*)::int from carts where id = $1", []any{live})).to_equal(1)
+    expect(db.scalar_int("select count(*)::int from login_attempts where ip = '203.0.113.1'", []any{})).to_equal(0)
+  })
+  dbit("a visitor's session lasts 7 days, a customer's 30", fn() {
+    setup()
+    cl := client()
+    pid := db.scalar_int("select id from products where active and stock > 5 order by id limit 1", []any{})
+    r := cl.req("POST", "/carrinho", form([]str{"product_id", str(pid), "qty", "1"}))
+    expect(r.header("Set-Cookie")).to_contain("Max-Age=604800")
+    db.exec("delete from login_attempts", []any{})
+    expect(login(cl, "cliente@emporiocaju.dev", PW, "").header("Set-Cookie")).to_contain("Max-Age=2592000")
+  })
+})

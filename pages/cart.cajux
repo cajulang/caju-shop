@@ -266,6 +266,7 @@ let pix_code = style.def("order-pix-code", "rounded-lg border bg-card p-3 font-m
 export struct OrderViewProps {
   order: model.Order
   admin: bool
+  demo: bool              # the store simulates payments (SHOP_DEMO_PAYMENTS)
 }
 
 export fn OrderView(p: OrderViewProps) -> *ui.Node {
@@ -295,14 +296,14 @@ export fn OrderView(p: OrderViewProps) -> *ui.Node {
     pay = (
       <section class={pix_box}>
         <h2 class={kit.section_title}>Pague com Pix</h2>
-        <p class={kit.muted_text}>Código de demonstração (não pague nada): copie, ou simule o pagamento.</p>
+        <p class={kit.muted_text}>Código de demonstração (não pague nada). A loja confirma o pagamento.</p>
         <div class={pix_code} data-pix="">{o.pix}</div>
         <div class={kit.row}>
           <button class={kit.button_ghost} type="button" onClick={fn() {
             ui.copy(o.pix)
             kit.notify(sh, "Código copiado.", "ok")
           }}>Copiar código</button>
-          <form method="post" action={"/pedidos/" + str(o.id) + "/pagar"}><button class={kit.button_primary} type="submit">Simular pagamento</button></form>
+          {ui.when(p.demo, <form method="post" action={"/pedidos/" + str(o.id) + "/pagar"}><button class={kit.button_primary} type="submit">Simular pagamento</button></form>)}
           <form method="post" action={"/pedidos/" + str(o.id) + "/cancelar"}><button class={kit.button_danger} type="submit">Cancelar pedido</button></form>
         </div>
       </section>
@@ -353,6 +354,7 @@ export fn OrderView(p: OrderViewProps) -> *ui.Node {
 
 export struct OrderPageProps {
   order: model.Order
+  demo: bool
 }
 
 export fn OrderPage(p: OrderPageProps) -> *ui.Node {
@@ -361,7 +363,7 @@ export fn OrderPage(p: OrderPageProps) -> *ui.Node {
       <div class={kit.stack}>
         <a class={kit.link} href="/conta/pedidos">← Meus pedidos</a>
         <h1 class={kit.page_title}>Pedido #{p.order.id}</h1>
-        <OrderView order={p.order} admin={false} />
+        <OrderView order={p.order} admin={false} demo={p.demo} />
       </div>
     </div>
   )

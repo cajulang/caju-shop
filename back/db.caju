@@ -16,16 +16,18 @@ export fn use(d: str) {
   pool = nil
 }
 
+# DATABASE_URL, required: there is no default (a password written here would end up in every
+# deployment that forgot to set its own)
 export fn dsn() -> str {
   if chosen != "" { return chosen }
-  d := os.getenv("DATABASE_URL")
-  if d == "" { return "postgres://shop:shop-dev@127.0.0.1:55440/shop" }
-  return d
+  return os.getenv("DATABASE_URL")
 }
 
 export fn get() -> *pg.Pool {
   if pool == nil {
-    p, err := pg.open(dsn(), 8)
+    d := dsn()
+    if d == "" { panic("database: set DATABASE_URL (postgres://user:password@host:port/database)") }
+    p, err := pg.open(d, 8)
     if err != nil { panic("database: " + err.Error()) }
     pool = p
   }
@@ -78,6 +80,16 @@ export fn scalar_int(sql: str, args: []any) -> int {
 
 export fn tx(f: fn(*pg.Conn) -> error) -> error { return get().transaction(f) }
 
+# several statements, without arguments (the simple protocol: migrations, the reset), in a
+# transaction. Never with text from outside.
+export fn script(sql: str) {
+  err := tx(fn(c: *pg.Conn) -> error {
+    _, e := c.exec_script(sql)
+    return e
+  })
+  if err != nil { panic("script: " + err.Error()) }
+}
+
 # helpers for a connection inside a transaction: a failure returns the error
 export fn must_query(c: *pg.Conn, sql: str, args: []any) -> *pg.Rows {
   rows, err := c.query(sql, args)
@@ -106,7 +118,7 @@ export fn migrate(dir: str) -> []str {
     text, rerr := fs.read_file(filepath.join(dir, n))
     if rerr != nil { panic(rerr.Error()) }
     terr := tx(fn(c: *pg.Conn) -> error {
-      _, e := c.exec(text, []any{})
+      _, e := c.exec_script(text)
       if e != nil { return e }
       _, e2 := c.exec("insert into schema_migrations (name) values ($1)", []any{n})
       return e2

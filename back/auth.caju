@@ -1,25 +1,55 @@
-# Passwords, sessions and the signed-in user.
+# Passwords, sessions, sign-in limits and the signed-in user.
 #
 # Passwords: PBKDF2-HMAC-SHA256 with a random salt, stored as "pbkdf2$<iterations>$<salt>$<key>"
-# (hex), so the cost can grow later. Sessions: the cookie "sid" carries 32 random bytes; the table
-# keeps their SHA-256. A session exists only once it is needed (a cart, a sign-in, a message).
+# (hex), so the cost can grow: a hash made with fewer iterations than the current ones is made
+# again when its owner signs in (needs_rehash). Sessions: the cookie "sid" carries 32 random bytes;
+# the table keeps their SHA-256. A session exists only once it is needed (a cart, a sign-in, a
+# message).
+#
+# Hashing is slow on purpose and a process serves one request at a time, so it is rationed: sign-in
+# attempts are counted per address and per account in the database (shared by every process), and
+# each process spends at most a share of its time hashing (limits.Budget).
 import "github.com/cajulang/web"
 import "std/crypto"
 import "std/hex"
+import "std/os"
 import "std/strings"
 import "std/strconv"
 import "./model"
 import "./back/db"
+import "./back/limits"
 
-const ITERATIONS = 60000
+# OWASP's minimum for PBKDF2-HMAC-SHA256 (2023). SHOP_PBKDF2_ITERATIONS changes it (the tests and
+# the end-to-end runs use fewer).
+const DEFAULT_ITERATIONS = 600000
 const COOKIE = "sid"
-const DAYS = 30
+const DAYS = 30                 # a signed-in customer's session
+const GUEST_DAYS = 7            # a visitor's (a cart, a message)
+const SECOND = 1000000000
+
+let iterations: int = env_int("SHOP_PBKDF2_ITERATIONS", DEFAULT_ITERATIONS, 1000)
+
+fn env_int(name: str, def: int, min: int) -> int {
+  v := os.getenv(name)
+  if v == "" { return def }
+  n, err := strconv.atoi(v)
+  if err != nil || n < min { return def }
+  return n
+}
+
+# the work factor of new hashes (the tests lower it)
+export fn set_iterations(n: int) {
+  iterations = n
+  dummy = ""
+}
+
+export fn current_iterations() -> int { return iterations }
 
 export fn hash_password(password: str) -> str {
   salt, err := crypto.random_bytes(16)
   if err != nil { panic("random: " + err.Error()) }
-  key := crypto.pbkdf2_sha256(password, salt, ITERATIONS, 32)
-  return "pbkdf2$" + str(ITERATIONS) + "$" + hex.encode(salt) + "$" + hex.encode(key)
+  key := crypto.pbkdf2_sha256(password, salt, iterations, 32)
+  return "pbkdf2$" + str(iterations) + "$" + hex.encode(salt) + "$" + hex.encode(key)
 }
 
 export fn check_password(password: str, stored: str) -> bool {
@@ -34,13 +64,110 @@ export fn check_password(password: str, stored: str) -> bool {
   return crypto.constant_time_eq(crypto.pbkdf2_sha256(password, salt, n, len(want)), want)
 }
 
+# a hash made with less work than new ones get (made again at the next sign-in)
+export fn needs_rehash(stored: str) -> bool {
+  parts := strings.split(stored, "$")
+  if len(parts) != 4 || parts[0] != "pbkdf2" { return true }
+  n, err := strconv.atoi(parts[1])
+  return err != nil || n < iterations
+}
+
+# a hash of nothing anyone knows: an e-mail without an account is checked against it, so it takes
+# as long as one with an account (the time does not tell which e-mails have accounts)
+let dummy: str = ""
+
+fn dummy_hash() -> str {
+  if dummy == "" { dummy = hash_password(token()) }
+  return dummy
+}
+
 export fn token() -> str {
   b, err := crypto.random_bytes(32)
   if err != nil { panic("random: " + err.Error()) }
   return hex.encode(b)
 }
 
+# a random password for the demonstration accounts: 16 letters and digits, without look-alikes
+export fn random_password() -> str {
+  alphabet := "abcdefghjkmnpqrstuvwxyzACDEFGHJKLMNPQRSTUVWXYZ23456789"
+  b, err := crypto.random_bytes(16)
+  if err != nil { panic("random: " + err.Error()) }
+  out := strings.Builder{}
+  for i := 0; i < len(b); i++ {
+    j := int(b[i]) % len(alphabet)
+    out.write(alphabet[j:j + 1])
+  }
+  return out.string()
+}
+
 fn token_hash(t: str) -> str { return crypto.sha256_hex(t) }
+
+# ---------------------------------------------------------------- rationing the hashes
+
+# at most SHOP_HASH_BUDGET_MS of each minute hashing, per process (default: half of it)
+let budget = limits.new_budget(60 * SECOND, env_int("SHOP_HASH_BUDGET_MS", 30000, 1) * 1000000)
+
+export fn set_hash_budget(max_ms: int) { budget = limits.new_budget(60 * SECOND, max_ms * 1000000) }
+
+# may this process hash a password now? (else: seconds to wait)
+export fn hash_slot() -> (bool, int) {
+  now := os.nanotime()
+  if budget.allow(now) { return true, 0 }
+  return false, budget.retry_after(now)
+}
+
+# hash_password and check_password, with their time counted in the budget
+export fn hash_counted(password: str) -> str {
+  t0 := os.nanotime()
+  h := hash_password(password)
+  t1 := os.nanotime()
+  budget.record(t1, t1 - t0)
+  return h
+}
+
+# stored "" (no such account): checked against the dummy hash, and false
+export fn check_counted(password: str, stored: str) -> bool {
+  t0 := os.nanotime()
+  ok := false
+  if stored == "" {
+    check_password(password, dummy_hash())
+  } else {
+    ok = check_password(password, stored)
+  }
+  t1 := os.nanotime()
+  budget.record(t1, t1 - t0)
+  return ok
+}
+
+# Attempts (sign-in, sign-up, password change), kept for a day in login_attempts: at most
+# ip_limit per address and account_limit failures per e-mail in WINDOW, whether the account
+# exists or not.
+const WINDOW = "15 minutes"
+let ip_limit: int = env_int("SHOP_IP_ATTEMPTS", 20, 1)
+let account_limit: int = env_int("SHOP_ACCOUNT_FAILURES", 5, 1)
+
+export fn set_attempt_limits(per_ip: int, per_account: int) {
+  ip_limit = per_ip
+  account_limit = per_account
+}
+
+# "" when an attempt from this address for this e-mail may go on; else why not
+export fn attempt_refused(ip: str, email: str) -> str {
+  key := limits.ip_key(ip)
+  if db.scalar_int("select count(*)::int from login_attempts where ip = $1 and at > now() - interval '" + WINDOW + "'", []any{key}) >= ip_limit {
+    return "Muitas tentativas a partir desta rede. Tente de novo em alguns minutos."
+  }
+  if email != "" && db.scalar_int("select count(*)::int from login_attempts where email = $1 and not ok and at > now() - interval '" + WINDOW + "'", []any{email}) >= account_limit {
+    return "Muitas tentativas para esta conta. Tente de novo em alguns minutos."
+  }
+  return ""
+}
+
+export fn record_attempt(ip: str, email: str, ok: bool) {
+  db.exec("insert into login_attempts (ip, email, ok) values ($1, $2, $3)", []any{limits.ip_key(ip), email, ok})
+}
+
+# ---------------------------------------------------------------- sessions
 
 # what a request knows about its visitor
 export struct Session {
@@ -56,6 +183,18 @@ export fn cookie(c: *web.Context, name: str) -> str {
     if strings.has_prefix(kv, name + "=") { return kv[len(name) + 1:] }
   }
   return ""
+}
+
+# Secure on the cookie: SECURE_COOKIES=1 when the store is reached over HTTPS (behind a proxy that
+# terminates TLS), so the browser never sends the session over plain HTTP
+let secure_cookies = os.getenv("SECURE_COOKIES") == "1"
+
+export fn set_secure_cookies(on: bool) { secure_cookies = on }
+
+fn cookie_attrs(max_age: int) -> str {
+  a := "; Path=/; Max-Age=" + str(max_age) + "; HttpOnly; SameSite=Lax"
+  if secure_cookies { a = a + "; Secure" }
+  return a
 }
 
 # the session of the request (kept in the context as "session"); the flash message is read once
@@ -81,10 +220,18 @@ export fn session(c: *web.Context) -> *Session {
   return s
 }
 
-# the session, created (with its cookie) when the visitor had none
+# new visitors' sessions per address and process: a script that drops its cookie on every request
+# cannot fill the sessions and carts tables
+let guest_sessions = limits.new_window(env_int("SHOP_GUEST_SESSIONS", 60, 1), 600 * SECOND, 20000)
+
+export fn set_guest_session_limit(n: int) { guest_sessions = limits.new_window(n, 600 * SECOND, 20000) }
+
+# the session, created (with its cookie) when the visitor had none; nil when this address has
+# started too many sessions lately
 export fn ensure(c: *web.Context) -> *Session {
   s := session(c)
   if s.hash != "" { return s }
+  if !guest_sessions.allow(limits.ip_key(c.client_ip()), os.nanotime()) { return nil }
   start(c, s, 0)
   return s
 }
@@ -93,16 +240,21 @@ fn start(c: *web.Context, s: *Session, customer_id: int) {
   t := token()
   s.hash = token_hash(t)
   let cust_v: any = nil
-  if customer_id > 0 { cust_v = customer_id }
+  days := GUEST_DAYS
+  if customer_id > 0 {
+    cust_v = customer_id
+    days = DAYS
+  }
   let cart_v: any = nil
   if s.cart_id > 0 { cart_v = s.cart_id }
-  db.exec("insert into sessions (token_hash, customer_id, cart_id, expires_at) values ($1, $2, $3, now() + interval '30 days')", []any{s.hash, cust_v, cart_v})
-  c.set_header("Set-Cookie", COOKIE + "=" + t + "; Path=/; Max-Age=" + str(DAYS * 86400) + "; HttpOnly; SameSite=Lax")
+  db.exec("insert into sessions (token_hash, customer_id, cart_id, expires_at) values ($1, $2, $3, now() + make_interval(days => $4))", []any{s.hash, cust_v, cart_v, days})
+  c.set_header("Set-Cookie", COOKIE + "=" + t + cookie_attrs(days * 86400))
 }
 
-# a message for the next page
+# a message for the next page (lost when no session can be made)
 export fn flash(c: *web.Context, msg: str) {
   s := ensure(c)
+  if s == nil { return }
   db.exec("update sessions set flash = $2 where token_hash = $1", []any{s.hash, msg})
 }
 
@@ -122,13 +274,19 @@ export fn sign_in(c: *web.Context, user: *model.User) {
   start(c, s, user.id)
 }
 
+# ends every session of the customer but the request's own (after a password change); returns how
+# many ended
+export fn end_other_sessions(c: *web.Context, customer_id: int) -> int {
+  return db.exec("delete from sessions where customer_id = $1 and token_hash <> $2", []any{customer_id, session(c).hash})
+}
+
 export fn sign_out(c: *web.Context) {
   s := session(c)
   if s.hash != "" { db.exec("delete from sessions where token_hash = $1", []any{s.hash}) }
   s.hash = ""
   s.user = nil
   s.cart_id = 0
-  c.set_header("Set-Cookie", COOKIE + "=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+  c.set_header("Set-Cookie", COOKIE + "=" + cookie_attrs(0))
 }
 
 # the customer's cart (created the first time)
@@ -137,12 +295,14 @@ export fn cart_of_customer(id: int) -> int {
   return r.get_int("id")
 }
 
-# the visitor's cart, created when create is true; 0 when there is none
+# the visitor's cart, created when create is true; 0 when there is none (or no session could be
+# made for it)
 export fn cart(c: *web.Context, create: bool) -> int {
   s := session(c)
   if s.cart_id > 0 { return s.cart_id }
   if !create { return 0 }
   s = ensure(c)
+  if s == nil { return 0 }
   id := 0
   if s.user != nil {
     id = cart_of_customer(s.user.id)
@@ -152,6 +312,27 @@ export fn cart(c: *web.Context, create: bool) -> int {
   db.exec("update sessions set cart_id = $2 where token_hash = $1", []any{s.hash, id})
   s.cart_id = id
   return id
+}
+
+# ---------------------------------------------------------------- housekeeping
+
+# drops what nobody can use any more: expired sessions, visitors' carts no session points to that
+# have not changed for GUEST_DAYS, and attempts older than a day. Returns the rows removed.
+export fn sweep() -> int {
+  n := db.exec("delete from sessions where expires_at <= now()", []any{})
+  n += db.exec("delete from carts c where c.customer_id is null and c.updated_at < now() - make_interval(days => $1) and not exists (select 1 from sessions s where s.cart_id = c.id)", []any{GUEST_DAYS})
+  n += db.exec("delete from login_attempts where at < now() - interval '1 day'", []any{})
+  return n
+}
+
+let swept_at: int = 0
+
+# sweep(), at most every 10 minutes per process
+export fn sweep_now_and_then() {
+  now := os.nanotime()
+  if swept_at != 0 && now - swept_at < 600 * SECOND { return }
+  swept_at = now
+  sweep()
 }
 
 # writes to the audit log

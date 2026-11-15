@@ -309,6 +309,7 @@ export struct Page {
   form: map[str]str       # the values sent, shown again with the errors
   errors: map[str]str
   next: str               # where to go after signing in
+  demo: bool              # SHOP_DEMO_PAYMENTS: customers may simulate a payment
   home: *HomeData
   search: *Search
   product: *ProductData

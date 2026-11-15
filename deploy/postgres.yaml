@@ -1,6 +1,12 @@
-# PostgreSQL 17 for development, in the local k3s: data in a volume, the port on the host
-# (ServiceLB): postgres://shop:shop-dev@127.0.0.1:55440/shop
+# PostgreSQL 17 for development, in a local cluster (k3s, kind...): data in a volume, reachable
+# only inside the cluster (a ClusterIP Service, never a port on every interface of the host).
+# The password comes from a Secret you create first; nothing here has a password in it:
+#   kubectl create namespace caju-shop
+#   kubectl -n caju-shop create secret generic pg --from-literal=password="$(openssl rand -hex 24)"
 #   kubectl apply -f deploy/postgres.yaml
+# From your machine, through a tunnel on 127.0.0.1 only:
+#   kubectl -n caju-shop port-forward svc/pg 55440:5432
+#   DATABASE_URL="postgres://shop:$(kubectl -n caju-shop get secret pg -o jsonpath='{.data.password}' | base64 -d)@127.0.0.1:55440/shop"
 apiVersion: v1
 kind: Namespace
 metadata: { name: caju-shop }
@@ -28,7 +34,8 @@ spec:
           ports: [{ containerPort: 5432 }]
           env:
             - { name: POSTGRES_USER, value: shop }
-            - { name: POSTGRES_PASSWORD, value: shop-dev }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: pg, key: password } }
             - { name: POSTGRES_DB, value: shop }
             - { name: POSTGRES_INITDB_ARGS, value: --auth=scram-sha-256 }
             - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
@@ -44,6 +51,6 @@ apiVersion: v1
 kind: Service
 metadata: { name: pg, namespace: caju-shop }
 spec:
-  type: LoadBalancer
+  type: ClusterIP
   selector: { app: pg }
-  ports: [{ port: 55440, targetPort: 5432 }]
+  ports: [{ port: 5432, targetPort: 5432 }]

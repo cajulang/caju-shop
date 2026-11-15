@@ -1,12 +1,18 @@
 // End-to-end tests in a real browser (Playwright): the store, the cart, the checkout, the account
 // and the panel, with the program in WebAssembly running (hydration, the API calls) and without it
-// (the plain forms). Needs the server running with the demonstration data:
-//   ./server reset && ./server migrate && ./server seed && ./server &
+// (the plain forms). Needs the server running with the demonstration data, known passwords, cheap
+// hashes and the simulated payment:
+//   export SEED_ADMIN_PASSWORD=... SEED_OPERATOR_PASSWORD=... SEED_CUSTOMER_PASSWORD=...
+//   export SHOP_PBKDF2_ITERATIONS=10000      (the seed's hashes too: the run signs in many times)
+//   ./server reset --dev && ./server migrate && ./server seed --dev
+//   SHOP_DEMO_PAYMENTS=1 ./server &
 //   BASE=http://127.0.0.1:3800 node tools/e2e.mjs        (SHOTS=dir saves screenshots; CHROMIUM=path
 //   uses that browser instead of the one playwright installed)
 import { chromium } from "playwright"
 
 const BASE = process.env.BASE || "http://127.0.0.1:3800"
+const PW = { admin: process.env.SEED_ADMIN_PASSWORD, operator: process.env.SEED_OPERATOR_PASSWORD, customer: process.env.SEED_CUSTOMER_PASSWORD }
+if (!PW.admin || !PW.operator || !PW.customer) { console.error("set SEED_ADMIN_PASSWORD, SEED_OPERATOR_PASSWORD and SEED_CUSTOMER_PASSWORD (as seeded)"); process.exit(2) }
 const SHOTS = process.env.SHOTS || ""
 let failures = 0
 let passed = 0
@@ -205,7 +211,7 @@ await test("checkout: sign in, address, coupon, order, pay", async () => {
   await page.goto(BASE + "/finalizar")
   check(page.url().includes("/entrar?next=%2Ffinalizar"), "the checkout asks to sign in")
   await page.fill("#f-email", "cliente@emporiocaju.dev")
-  await page.fill("#f-password", "cliente123")
+  await page.fill("#f-password", PW.customer)
   await Promise.all([page.waitForNavigation(), page.click("form[action='/entrar'] button[type=submit]")])
   check(page.url().includes("/finalizar"), "and comes back to it")
   await hydrated(page)
@@ -274,14 +280,14 @@ await test("panel: access, dashboard, roles", async () => {
   watch(page)
   await page.goto(BASE + "/admin")
   check(page.url().includes("/entrar"), "the panel asks to sign in")
-  await signIn(page, "cliente@emporiocaju.dev", "cliente123")
+  await signIn(page, "cliente@emporiocaju.dev", PW.customer)
   await page.goto(BASE + "/admin")
   check((await page.textContent("h2")).includes("não encontrada"), "a customer gets a 404")
   await ctx.close()
   const admin = await browser.newContext({ viewport: { width: 1400, height: 1000 } })
   const p2 = await admin.newPage()
   watch(p2)
-  await signIn(p2, "admin@emporiocaju.dev", "admin123")
+  await signIn(p2, "admin@emporiocaju.dev", PW.admin)
   check(p2.url().endsWith("/admin"), "an admin lands on the dashboard")
   await hydrated(p2)
   check(await p2.locator(".admin-stat").count() === 5, "five indicators")
@@ -293,7 +299,7 @@ await test("panel: access, dashboard, roles", async () => {
   await admin.close()
   const op = await browser.newContext()
   const p3 = await op.newPage()
-  await signIn(p3, "operador@emporiocaju.dev", "operador123")
+  await signIn(p3, "operador@emporiocaju.dev", PW.operator)
   await p3.goto(BASE + "/admin/cupons")
   check(p3.url().endsWith("/admin") && (await p3.textContent("[role=alert]")).includes("administradores"), "an operator cannot open the coupons")
   await p3.goto(BASE + "/admin/pedidos")
@@ -305,7 +311,7 @@ await test("panel: products (create, edit, stock, bulk)", async () => {
   const ctx = await browser.newContext({ viewport: { width: 1400, height: 1000 } })
   const page = await ctx.newPage()
   watch(page)
-  await signIn(page, "admin@emporiocaju.dev", "admin123")
+  await signIn(page, "admin@emporiocaju.dev", PW.admin)
   await page.goto(BASE + "/admin/produtos/novo")
   await hydrated(page)
   await page.$eval("form[action='/admin/produtos/novo']", (f) => { f.noValidate = true })
@@ -349,7 +355,7 @@ await test("panel: orders, categories, sections, coupons, customers", async () =
   const ctx = await browser.newContext({ viewport: { width: 1400, height: 1000 } })
   const page = await ctx.newPage()
   watch(page)
-  await signIn(page, "admin@emporiocaju.dev", "admin123")
+  await signIn(page, "admin@emporiocaju.dev", PW.admin)
   // the order paid in the checkout test: ship it, then deliver
   const id = orderUrl.split("/").pop()
   await page.goto(BASE + "/admin/pedidos/" + id)

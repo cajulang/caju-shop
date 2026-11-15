@@ -34,7 +34,7 @@ fn store_page(p: model.Page) -> *ui.Node {
   case "product": return <catalog.ProductPage data={*p.product} />
   case "cart": return <cart.CartPage cart={*p.cart} free_from={p.checkout.quote.free_from} />
   case "checkout": return <cart.CheckoutPage data={*p.checkout} page={p} />
-  case "order": return <cart.OrderPage order={*p.order} />
+  case "order": return <cart.OrderPage order={*p.order} demo={p.demo} />
   case "login": return <account.Login page={p} />
   case "signup": return <account.Signup page={p} />
   case "account": return <account.AccountPage page={p} />

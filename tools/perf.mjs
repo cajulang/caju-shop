@@ -1,14 +1,18 @@
 // Measures the store: the server (latency of each page, throughput with 1 and 4 processes, memory),
 // what each page transfers, and the browser (first paint, hydration, Slow 4G). Writes PERF.md.
 //   ./server must be built and the database seeded; this script starts its own servers.
-//   node tools/perf.mjs            (DATABASE_URL, RUNS=3)
+//   node tools/perf.mjs            (DATABASE_URL, RUNS=3; the accounts' passwords in
+//                                   SEED_ADMIN_PASSWORD and SEED_CUSTOMER_PASSWORD, as seeded)
 import { chromium } from "playwright"
 import http from "node:http"
 import zlib from "node:zlib"
 import fs from "node:fs"
 import { spawn, execSync } from "node:child_process"
 
-const DSN = process.env.DATABASE_URL || "postgres://shop:shop-dev@192.168.0.6:55440/shop"
+const DSN = process.env.DATABASE_URL
+if (!DSN) { console.error("set DATABASE_URL"); process.exit(2) }
+const ADMIN_PW = process.env.SEED_ADMIN_PASSWORD, CUSTOMER_PW = process.env.SEED_CUSTOMER_PASSWORD
+if (!ADMIN_PW || !CUSTOMER_PW) { console.error("set SEED_ADMIN_PASSWORD and SEED_CUSTOMER_PASSWORD (the passwords seed gave the accounts)"); process.exit(2) }
 const RUNS = Number(process.env.RUNS || 3)
 const PORT = 3890
 const BASE = `http://127.0.0.1:${PORT}`
@@ -86,8 +90,8 @@ const PAGES = [
 
 // ---------------------------------------------------------------- the server
 let server = await start(1)
-const admin = await cookieOf("admin@emporiocaju.dev", "admin123")
-const customer = await cookieOf("cliente@emporiocaju.dev", "cliente123")
+const admin = await cookieOf("admin@emporiocaju.dev", ADMIN_PW)
+const customer = await cookieOf("cliente@emporiocaju.dev", CUSTOMER_PW)
 const signed = (path) => ({ cookie: path.startsWith("/admin") ? admin : customer })
 const idle = rss()
 async function timed(path, headers) {
@@ -113,8 +117,8 @@ for (const [name, path, auth] of LOADS) {
 const busy1 = rss()
 await stop(server)
 server = await start(4)
-const admin4 = await cookieOf("admin@emporiocaju.dev", "admin123")
-const customer4 = await cookieOf("cliente@emporiocaju.dev", "cliente123")
+const admin4 = await cookieOf("admin@emporiocaju.dev", ADMIN_PW)
+const customer4 = await cookieOf("cliente@emporiocaju.dev", CUSTOMER_PW)
 const four = {}
 for (const [name, path, auth] of LOADS) {
   const h = auth ? { cookie: path.startsWith("/admin") ? admin4 : customer4 } : {}
